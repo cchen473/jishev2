@@ -1,0 +1,27 @@
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+venv/
+.venv/
+
+# Node / Next
+frontend/node_modules/
+frontend/.next/
+
+# Local env files
+.env
+.env.*
+backend/.env
+frontend/.env
+frontend/.env.*
+
+# Runtime artifacts
+backend/uploads/
+backend/data/nebulaguard.db
+backend/data/nebulaguard.db-*
