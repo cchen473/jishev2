@@ -115,6 +115,36 @@ class Storage:
                         FOREIGN KEY(community_id) REFERENCES communities(id),
                         FOREIGN KEY(sender_user_id) REFERENCES users(id)
                     );
+
+                    CREATE TABLE IF NOT EXISTS community_chat_messages (
+                        id TEXT PRIMARY KEY,
+                        community_id TEXT NOT NULL,
+                        sender_user_id TEXT,
+                        sender_name TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        metadata_json TEXT,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY(community_id) REFERENCES communities(id),
+                        FOREIGN KEY(sender_user_id) REFERENCES users(id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS fire_rescue_analyses (
+                        id TEXT PRIMARY KEY,
+                        community_id TEXT NOT NULL,
+                        requester_user_id TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        lat REAL,
+                        lng REAL,
+                        scene_model_name TEXT,
+                        scene_model_url TEXT,
+                        image_urls_json TEXT,
+                        analysis_json TEXT,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY(community_id) REFERENCES communities(id),
+                        FOREIGN KEY(requester_user_id) REFERENCES users(id)
+                    );
                     """
                 )
                 conn.commit()
@@ -434,6 +464,146 @@ class Storage:
         for row in rows:
             item = dict(row)
             item["payload"] = self._safe_load_json(item.get("payload_json")) or {}
+            items.append(item)
+        items.reverse()
+        return items
+
+    def add_chat_message(
+        self,
+        *,
+        community_id: str,
+        sender_name: str,
+        role: str,
+        content: str,
+        sender_user_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        record = {
+            "id": uuid.uuid4().hex,
+            "community_id": community_id,
+            "sender_user_id": sender_user_id,
+            "sender_name": sender_name.strip() or "unknown",
+            "role": role.strip() or "user",
+            "content": content.strip(),
+            "metadata_json": json.dumps(metadata or {}, ensure_ascii=False),
+            "created_at": utc_now(),
+        }
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO community_chat_messages (
+                        id, community_id, sender_user_id, sender_name, role, content, metadata_json, created_at
+                    )
+                    VALUES (
+                        :id, :community_id, :sender_user_id, :sender_name, :role, :content, :metadata_json, :created_at
+                    )
+                    """,
+                    record,
+                )
+                conn.commit()
+        payload = {**record}
+        payload["metadata"] = self._safe_load_json(record.get("metadata_json")) or {}
+        return payload
+
+    def list_chat_messages(
+        self, *, community_id: str, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 500)
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        id, community_id, sender_user_id, sender_name, role,
+                        content, metadata_json, created_at
+                    FROM community_chat_messages
+                    WHERE community_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (community_id, safe_limit),
+                ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["metadata"] = self._safe_load_json(item.get("metadata_json")) or {}
+            items.append(item)
+        items.reverse()
+        return items
+
+    def add_fire_rescue_analysis(
+        self,
+        *,
+        community_id: str,
+        requester_user_id: str,
+        description: str,
+        lat: float | None,
+        lng: float | None,
+        scene_model_name: str | None,
+        scene_model_url: str | None,
+        image_urls: list[str] | None,
+        analysis: dict[str, Any],
+        status: str,
+    ) -> dict[str, Any]:
+        record = {
+            "id": uuid.uuid4().hex,
+            "community_id": community_id,
+            "requester_user_id": requester_user_id,
+            "description": description.strip(),
+            "lat": lat,
+            "lng": lng,
+            "scene_model_name": scene_model_name,
+            "scene_model_url": scene_model_url,
+            "image_urls_json": json.dumps(image_urls or [], ensure_ascii=False),
+            "analysis_json": json.dumps(analysis or {}, ensure_ascii=False),
+            "status": status,
+            "created_at": utc_now(),
+        }
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO fire_rescue_analyses (
+                        id, community_id, requester_user_id, description, lat, lng,
+                        scene_model_name, scene_model_url, image_urls_json, analysis_json, status, created_at
+                    )
+                    VALUES (
+                        :id, :community_id, :requester_user_id, :description, :lat, :lng,
+                        :scene_model_name, :scene_model_url, :image_urls_json, :analysis_json, :status, :created_at
+                    )
+                    """,
+                    record,
+                )
+                conn.commit()
+        payload = {**record}
+        payload["image_urls"] = self._safe_load_json(record.get("image_urls_json")) or []
+        payload["analysis"] = self._safe_load_json(record.get("analysis_json")) or {}
+        return payload
+
+    def list_fire_rescue_analyses(
+        self, *, community_id: str, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 200)
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        id, community_id, requester_user_id, description, lat, lng,
+                        scene_model_name, scene_model_url, image_urls_json, analysis_json, status, created_at
+                    FROM fire_rescue_analyses
+                    WHERE community_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (community_id, safe_limit),
+                ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["image_urls"] = self._safe_load_json(item.get("image_urls_json")) or []
+            item["analysis"] = self._safe_load_json(item.get("analysis_json")) or {}
             items.append(item)
         items.reverse()
         return items

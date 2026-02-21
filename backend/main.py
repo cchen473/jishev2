@@ -42,6 +42,7 @@ try:
         verify_password,
     )
     from backend.utils.rag_engine import retrieve_policy
+    from backend.utils.yolo_detector import YoloPersonDetector
 except ImportError:
     from agents.manager import MissionManager
     from config import settings
@@ -53,6 +54,7 @@ except ImportError:
         verify_password,
     )
     from utils.rag_engine import retrieve_policy
+    from utils.yolo_detector import YoloPersonDetector
 
 app = FastAPI(title=settings.app_name, version=settings.app_version)
 app.add_middleware(
@@ -69,6 +71,7 @@ app.mount("/uploads", StaticFiles(directory=str(settings.upload_dir)), name="upl
 storage = Storage(settings.database_path)
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "8")) * 1024 * 1024
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_\u4e00-\u9fff]{2,32}$")
+MAX_FIRE_IMAGES = int(os.getenv("MAX_FIRE_IMAGES", "6"))
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -112,6 +115,15 @@ class LegacyReportRequest(BaseModel):
 class CommunityAlertRequest(BaseModel):
     title: str = Field(..., min_length=2, max_length=80)
     content: str = Field(..., min_length=2, max_length=600)
+
+
+class CommunityChatRequest(BaseModel):
+    content: str = Field(..., min_length=1, max_length=3000)
+    ask_ai: bool = Field(default=False)
+
+
+class CommunityAssistantRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=3000)
 
 
 class RouteAdviceRequest(BaseModel):
@@ -180,6 +192,14 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+fire_person_detector = YoloPersonDetector(
+    model_path=settings.yolo_model_path,
+    model_url=settings.yolo_model_url,
+    input_size=settings.yolo_input_size,
+    confidence_threshold=settings.yolo_confidence_threshold,
+    iou_threshold=settings.yolo_iou_threshold,
+    max_detections=settings.yolo_max_detections,
+)
 
 
 def utc_now() -> str:
@@ -308,6 +328,384 @@ def run_vlm_analysis(
             "advice": fallback,
             "error": str(exc),
         }
+
+
+def build_community_snapshot(community_id: str) -> str:
+    summary = storage.get_summary(community_id=community_id)
+    reports = storage.list_recent_earthquake_reports(limit=5, community_id=community_id)
+    notifications = storage.list_notifications(community_id=community_id, limit=5)
+
+    report_lines = [
+        f"- 震感{item.get('felt_level', '未知')}级，建筑{item.get('building_type', '未知')}，描述：{item.get('description', '')}"
+        for item in reports[-5:]
+    ]
+    notice_lines = [
+        f"- {item.get('title', '通知')}: {item.get('content', '')}" for item in notifications[-5:]
+    ]
+    return (
+        f"社区统计: 报告总数={summary.get('total_reports', 0)}, 执行中任务={summary.get('active_missions', 0)}\n"
+        f"近期震情:\n{chr(10).join(report_lines) if report_lines else '- 暂无'}\n"
+        f"近期通知:\n{chr(10).join(notice_lines) if notice_lines else '- 暂无'}"
+    )
+
+
+def heuristic_community_assistant_answer(question: str) -> str:
+    q = question.strip()
+    return (
+        "### 社区AI管理助手建议\n"
+        f"- 你提出的问题：{q or '未提供问题'}\n"
+        "- 先确认社区内高风险点（老旧建筑、人员密集区、学校医院）并进行分级。\n"
+        "- 在群聊发布统一通知模板：避险动作、集合点、联系人、物资点。\n"
+        "- 每 15 分钟滚动更新震情摘要，确保居民收到同一版本指令。\n"
+        "- 指定网格员负责老人、儿童、行动不便人群的一对一确认。"
+    )
+
+
+def run_community_assistant(
+    *,
+    community_id: str,
+    user_display_name: str,
+    question: str,
+    recent_chat_messages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    fallback = heuristic_community_assistant_answer(question)
+    if OpenAI is None or not settings.openai_api_key:
+        return {"status": "mock", "answer": fallback}
+
+    try:
+        chat_context = "\n".join(
+            f"- [{item.get('role', 'user')}] {item.get('sender_name', 'unknown')}: {item.get('content', '')[:220]}"
+            for item in recent_chat_messages[-12:]
+        )
+        snapshot = build_community_snapshot(community_id)
+        prompt = (
+            "你是社区AI管理助手，目标是帮助社区管理者做应急沟通与资源协调。\n"
+            "输出要求：中文、结构清晰、可执行，优先用 Markdown 列表。\n\n"
+            f"提问人: {user_display_name}\n"
+            f"问题: {question}\n\n"
+            f"社区状态:\n{snapshot}\n\n"
+            f"近期群聊上下文:\n{chat_context or '- 暂无'}\n"
+        )
+        client_kwargs: dict[str, Any] = {"api_key": settings.openai_api_key}
+        if settings.openai_base_url:
+            client_kwargs["base_url"] = settings.openai_base_url
+        client = OpenAI(**client_kwargs)
+        completion = client.chat.completions.create(
+            model=settings.openai_model,
+            temperature=0.3,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "你是专业社区应急治理助手，给出简洁可执行建议，不输出无关内容。",
+                },
+                {"role": "user", "content": prompt},
+            ],
+        )
+        answer = completion.choices[0].message.content if completion.choices else ""
+        if not (answer or "").strip():
+            answer = fallback
+        return {"status": "ok", "answer": answer}
+    except Exception as exc:
+        return {"status": "degraded", "answer": fallback, "error": str(exc)}
+
+
+def heuristic_fire_rescue_analysis(
+    *,
+    description: str,
+    lat: float | None,
+    lng: float | None,
+    warning: str | None = None,
+) -> dict[str, Any]:
+    coord = f"{lat:.5f}, {lng:.5f}" if lat is not None and lng is not None else "未知坐标"
+    return {
+        "scene_overview": f"火灾现场初步评估完成（{coord}），当前未形成稳定视觉识别结果，建议按网格分区搜救。",
+        "victims": [],
+        "routes": [
+            {
+                "name": "R1-网格搜救主线",
+                "steps": [
+                    "以主入口为起点，按左-中-右三列网格推进",
+                    "优先排查楼梯间、疏散通道和烟雾聚集区",
+                    "每 3 分钟更新一次搜救网格状态",
+                ],
+                "risk": "现场目标位置不明确，存在漏检风险",
+                "recommended_team": "搜救组A + 通信引导组",
+            },
+            {
+                "name": "R2-外围复核线",
+                "steps": [
+                    "沿建筑外围建立安全观察点",
+                    "对窗台、阳台和临边区域进行二次确认",
+                    "与主线共享图像与坐标更新",
+                ],
+                "risk": "外立面坠落物与局部高温",
+                "recommended_team": "搜救组B + 安全警戒组",
+            },
+        ],
+        "command_notes": [
+            "本次结果为 YOLO 视觉流程的降级方案（未使用 VLM）。",
+            "优先断电断气并控制围观人员，防止二次事故。",
+            f"现场描述参考：{description or '无'}",
+            *([f"降级原因：{warning}"] if warning else []),
+        ],
+    }
+
+
+def _victim_risk_level(score: float) -> str:
+    if score >= 0.62:
+        return "高"
+    if score >= 0.45:
+        return "中"
+    return "低"
+
+
+def _build_fire_routes(victims: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not victims:
+        return [
+            {
+                "name": "R1-无目标网格巡检",
+                "steps": [
+                    "按网格方式推进，优先覆盖烟雾高密度区域",
+                    "重点排查通道、楼梯间和拐角盲区",
+                    "持续回传航拍画面，等待下一轮自动识别",
+                ],
+                "risk": "视觉暂未发现明确目标，可能存在遮挡漏检",
+                "recommended_team": "搜救组A + 航拍侦查组",
+            }
+        ]
+
+    primary_targets = victims[: min(3, len(victims))]
+    secondary_targets = victims[min(3, len(victims)) : min(6, len(victims))]
+    target_hint = "、".join(item.get("position_hint", "未知点位") for item in primary_targets)
+    routes = [
+        {
+            "name": "R1-高优先级突入线",
+            "steps": [
+                "从上风向入口突入并设置引导绳",
+                f"优先接近目标：{target_hint}",
+                "完成转运后回传目标状态并重新分配小队",
+            ],
+            "risk": "高温烟层和可见度下降影响推进效率",
+            "recommended_team": "搜救组A + 医疗转运组",
+        }
+    ]
+
+    if secondary_targets:
+        secondary_hint = "、".join(item.get("position_hint", "未知点位") for item in secondary_targets)
+        routes.append(
+            {
+                "name": "R2-侧翼补盲线",
+                "steps": [
+                    "由北/西侧安全通道推进建立缓冲点",
+                    f"同步复核次级目标：{secondary_hint}",
+                    "与主线保持双向通信并准备接应撤离",
+                ],
+                "risk": "局部结构稳定性与碎片坠落风险",
+                "recommended_team": "搜救组B + 结构评估组",
+            }
+        )
+    else:
+        routes.append(
+            {
+                "name": "R2-外围封控线",
+                "steps": [
+                    "清理外侧通道并建立警戒圈",
+                    "为后续救援转运开辟备用通道",
+                    "保持对主线的热区监测和烟气观测",
+                ],
+                "risk": "外围火点复燃和人员回流风险",
+                "recommended_team": "警戒组 + 后勤保障组",
+            }
+        )
+    return routes
+
+
+def _analysis_from_yolo_detections(
+    *,
+    description: str,
+    lat: float | None,
+    lng: float | None,
+    image_results: list[dict[str, Any]],
+    detection_errors: list[str],
+) -> dict[str, Any]:
+    candidates: list[dict[str, Any]] = []
+    for image_idx, image_result in enumerate(image_results, 1):
+        image_name = image_result.get("name") or f"image-{image_idx}"
+        image_url = image_result.get("url")
+        for det in image_result.get("detections", []):
+            confidence = float(det.get("confidence", 0.0))
+            area_ratio = float(det.get("area_ratio", 0.0))
+            risk_score = min(0.99, confidence * 0.72 + min(area_ratio * 4.5, 0.28))
+            candidates.append(
+                {
+                    "image_name": image_name,
+                    "image_url": image_url,
+                    "confidence": confidence,
+                    "bbox_xyxy": det.get("bbox_xyxy", []),
+                    "position_hint": det.get("position_hint", "画面未知区域"),
+                    "center_x": float(det.get("center_x", 0.5)),
+                    "center_y": float(det.get("center_y", 0.5)),
+                    "area_ratio": area_ratio,
+                    "risk_score": risk_score,
+                }
+            )
+
+    candidates.sort(
+        key=lambda item: (
+            float(item.get("risk_score", 0.0)),
+            float(item.get("confidence", 0.0)),
+            float(item.get("area_ratio", 0.0)),
+        ),
+        reverse=True,
+    )
+
+    victims: list[dict[str, Any]] = []
+    for index, item in enumerate(candidates[:30], 1):
+        risk_level = _victim_risk_level(float(item.get("risk_score", 0.0)))
+        bbox = item.get("bbox_xyxy") or []
+        victims.append(
+            {
+                "id": f"V-{index}",
+                "position_hint": f"{item.get('image_name', '现场图')} · {item.get('position_hint', '未知区域')}",
+                "priority": index,
+                "evidence": (
+                    f"YOLO(person)置信度 {float(item.get('confidence', 0.0)):.2f}，"
+                    f"边框 {bbox if bbox else '未知'}"
+                ),
+                "image_name": item.get("image_name"),
+                "image_url": item.get("image_url"),
+                "bbox_xyxy": bbox,
+                "confidence": round(float(item.get("confidence", 0.0)), 4),
+                "center": {
+                    "x": round(float(item.get("center_x", 0.5)), 4),
+                    "y": round(float(item.get("center_y", 0.5)), 4),
+                },
+                "area_ratio": round(float(item.get("area_ratio", 0.0)), 6),
+                "risk_level": risk_level,
+            },
+        )
+
+    detection_count = len(candidates)
+    image_count = len(image_results)
+    hit_images = sum(1 for item in image_results if item.get("detections"))
+    coord = f"{lat:.5f}, {lng:.5f}" if lat is not None and lng is not None else "未知坐标"
+
+    if detection_count:
+        scene_overview = (
+            f"YOLO 鸟瞰图检测完成（{coord}），共分析 {image_count} 张图，"
+            f"发现疑似受困人员 {detection_count} 人次，涉及 {hit_images} 张图像。"
+        )
+    else:
+        scene_overview = (
+            f"YOLO 鸟瞰图检测完成（{coord}），共分析 {image_count} 张图，"
+            "当前未识别到明确受困人员目标，建议继续补充多角度航拍。"
+        )
+
+    routes = _build_fire_routes(victims)
+    notes = [
+        "本次结果由原生 YOLO 人员检测生成，未调用 VLM。",
+        "请救援小队对高优先级目标执行目视复核后再突入。",
+        "建议 2-3 分钟更新一次鸟瞰图并复跑检测。",
+        f"现场描述参考：{description or '无'}",
+    ]
+    if detection_errors:
+        notes.append(f"部分图片检测异常：{'; '.join(detection_errors[:3])}")
+
+    detection_summary = [
+        {
+            "image_name": item.get("name", f"image-{idx + 1}"),
+            "image_url": item.get("url"),
+            "detected_people": len(item.get("detections", [])),
+        }
+        for idx, item in enumerate(image_results)
+    ]
+
+    return {
+        "scene_overview": scene_overview,
+        "victims": victims,
+        "routes": routes,
+        "command_notes": notes,
+        "detection_summary": detection_summary,
+    }
+
+
+def run_fire_rescue_analysis(
+    *,
+    description: str,
+    lat: float | None,
+    lng: float | None,
+    images: list[dict[str, Any]],
+) -> dict[str, Any]:
+    fallback = heuristic_fire_rescue_analysis(description=description, lat=lat, lng=lng)
+    if not images:
+        return {
+            "status": "degraded",
+            "analysis": fallback,
+            "error": "未提供可分析的鸟瞰图",
+        }
+    if not fire_person_detector.available:
+        return {
+            "status": "degraded",
+            "analysis": heuristic_fire_rescue_analysis(
+                description=description,
+                lat=lat,
+                lng=lng,
+                warning="onnxruntime 不可用，YOLO 推理未执行",
+            ),
+            "error": "onnxruntime 未安装，无法运行 YOLO",
+        }
+
+    image_results: list[dict[str, Any]] = []
+    detection_errors: list[str] = []
+    try:
+        for idx, image in enumerate(images[:MAX_FIRE_IMAGES], 1):
+            name = str(image.get("name") or f"image-{idx}")
+            url = image.get("url")
+            raw = image.get("bytes")
+            if not isinstance(raw, (bytes, bytearray)) or not raw:
+                detection_errors.append(f"{name} 缺少有效图片字节")
+                continue
+            try:
+                detected = fire_person_detector.detect_people(bytes(raw))
+                image_results.append(
+                    {
+                        "name": name,
+                        "url": url,
+                        "width": detected.get("width"),
+                        "height": detected.get("height"),
+                        "detections": detected.get("detections", []),
+                    }
+                )
+            except Exception as image_exc:
+                detection_errors.append(f"{name}: {image_exc}")
+                image_results.append({"name": name, "url": url, "detections": []})
+    except Exception as exc:
+        return {"status": "degraded", "analysis": fallback, "error": str(exc)}
+
+    if not image_results:
+        return {
+            "status": "degraded",
+            "analysis": heuristic_fire_rescue_analysis(
+                description=description,
+                lat=lat,
+                lng=lng,
+                warning="全部图片均未成功进入 YOLO 推理",
+            ),
+            "error": "; ".join(detection_errors) if detection_errors else "未生成有效图片分析结果",
+        }
+
+    analysis = _analysis_from_yolo_detections(
+        description=description,
+        lat=lat,
+        lng=lng,
+        image_results=image_results,
+        detection_errors=detection_errors,
+    )
+    status = "ok" if not detection_errors else "degraded"
+    payload: dict[str, Any] = {"status": status, "analysis": analysis}
+    if detection_errors:
+        payload["error"] = "; ".join(detection_errors)
+    return payload
 
 
 def sanitize_username(username: str) -> str:
@@ -500,6 +898,31 @@ async def create_earthquake_report_and_notify(
     }
 
 
+async def create_and_broadcast_chat_message(
+    *,
+    community_id: str,
+    sender_user_id: str | None,
+    sender_name: str,
+    role: str,
+    content: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    message = storage.add_chat_message(
+        community_id=community_id,
+        sender_user_id=sender_user_id,
+        sender_name=sender_name,
+        role=role,
+        content=content,
+        metadata=metadata,
+    )
+    payload = {
+        "type": "community_chat_message",
+        "message": {**message, "metadata": message.get("metadata") or {}},
+    }
+    await manager.broadcast_to_community(community_id, payload)
+    return message
+
+
 @app.get("/")
 async def root() -> dict[str, Any]:
     return {
@@ -630,6 +1053,232 @@ async def community_alert_broadcast(
     }
     await manager.broadcast_to_community(community["id"], payload)
     return {"status": "success", "notification": notification}
+
+
+@app.get("/community/chat/messages")
+async def community_chat_messages(
+    limit: int = Query(default=100, ge=1, le=500),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    items = storage.list_chat_messages(community_id=community["id"], limit=limit)
+    for item in items:
+        item.pop("metadata_json", None)
+    return {"count": len(items), "items": items}
+
+
+@app.post("/community/chat/send")
+async def community_chat_send(
+    req: CommunityChatRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    content = req.content.strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="消息内容不能为空")
+
+    message = await create_and_broadcast_chat_message(
+        community_id=community["id"],
+        sender_user_id=user["id"],
+        sender_name=user["display_name"],
+        role="user",
+        content=content,
+    )
+    message.pop("metadata_json", None)
+
+    assistant_message: dict[str, Any] | None = None
+    assistant_meta: dict[str, Any] | None = None
+    if req.ask_ai:
+        history = storage.list_chat_messages(community_id=community["id"], limit=40)
+        ai_resp = run_community_assistant(
+            community_id=community["id"],
+            user_display_name=user["display_name"],
+            question=content,
+            recent_chat_messages=history,
+        )
+        assistant_meta = {"status": ai_resp.get("status"), "error": ai_resp.get("error")}
+        assistant_message = await create_and_broadcast_chat_message(
+            community_id=community["id"],
+            sender_user_id=None,
+            sender_name="社区AI助手",
+            role="assistant",
+            content=str(ai_resp.get("answer", "")),
+            metadata=assistant_meta,
+        )
+        assistant_message.pop("metadata_json", None)
+
+    return {
+        "status": "success",
+        "message": message,
+        "assistant_message": assistant_message,
+        "assistant_meta": assistant_meta,
+    }
+
+
+@app.post("/community/assistant/ask")
+async def community_assistant_ask(
+    req: CommunityAssistantRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    question = req.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="问题不能为空")
+
+    user_message = await create_and_broadcast_chat_message(
+        community_id=community["id"],
+        sender_user_id=user["id"],
+        sender_name=user["display_name"],
+        role="user",
+        content=question,
+    )
+    history = storage.list_chat_messages(community_id=community["id"], limit=40)
+    ai_resp = run_community_assistant(
+        community_id=community["id"],
+        user_display_name=user["display_name"],
+        question=question,
+        recent_chat_messages=history,
+    )
+    assistant_message = await create_and_broadcast_chat_message(
+        community_id=community["id"],
+        sender_user_id=None,
+        sender_name="社区AI助手",
+        role="assistant",
+        content=str(ai_resp.get("answer", "")),
+        metadata={"status": ai_resp.get("status"), "error": ai_resp.get("error")},
+    )
+    user_message.pop("metadata_json", None)
+    assistant_message.pop("metadata_json", None)
+    return {
+        "status": "success",
+        "user_message": user_message,
+        "assistant_message": assistant_message,
+        "assistant_status": ai_resp.get("status", "mock"),
+        "assistant_error": ai_resp.get("error"),
+    }
+
+
+@app.post("/rescue/fire/analyze")
+async def fire_rescue_analyze(
+    description: str = Form(""),
+    lat: float | None = Form(default=None),
+    lng: float | None = Form(default=None),
+    images: list[UploadFile] | None = File(default=None),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    image_files = images or []
+    if not image_files:
+        raise HTTPException(status_code=400, detail="请至少上传 1 张鸟瞰图")
+    if len(image_files) > MAX_FIRE_IMAGES:
+        raise HTTPException(status_code=400, detail=f"最多上传 {MAX_FIRE_IMAGES} 张现场图片")
+
+    if lat is not None and not (-90 <= lat <= 90):
+        raise HTTPException(status_code=400, detail="lat 越界")
+    if lng is not None and not (-180 <= lng <= 180):
+        raise HTTPException(status_code=400, detail="lng 越界")
+
+    image_dir = settings.upload_dir / "fire_images"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    image_urls: list[str] = []
+    image_payloads: list[dict[str, Any]] = []
+    for image in image_files:
+        if not image.content_type or not image.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="上传文件中包含非图片类型")
+        raw = await image.read()
+        if len(raw) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"图片过大，单张限制 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB",
+            )
+        ext = Path(image.filename or "").suffix.lower() or ".jpg"
+        fname = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex}{ext}"
+        fpath = image_dir / fname
+        fpath.write_bytes(raw)
+        url = f"/uploads/fire_images/{fname}"
+        image_urls.append(url)
+        image_payloads.append(
+            {"name": image.filename or fname, "bytes": raw, "mime": image.content_type, "url": url}
+        )
+
+    ai_resp = run_fire_rescue_analysis(
+        description=description.strip(),
+        lat=lat,
+        lng=lng,
+        images=image_payloads,
+    )
+    analysis = ai_resp.get("analysis") or {}
+    victims = analysis.get("victims") if isinstance(analysis, dict) else []
+    victim_count = len(victims) if isinstance(victims, list) else 0
+
+    record = storage.add_fire_rescue_analysis(
+        community_id=community["id"],
+        requester_user_id=user["id"],
+        description=description.strip(),
+        lat=lat,
+        lng=lng,
+        scene_model_name=None,
+        scene_model_url=None,
+        image_urls=image_urls,
+        analysis=analysis if isinstance(analysis, dict) else {},
+        status=str(ai_resp.get("status", "degraded")),
+    )
+    record.pop("image_urls_json", None)
+    record.pop("analysis_json", None)
+
+    notice_content = (
+        f"[{community['name']}] 鸟瞰图 YOLO 救援分析已更新：识别疑似受困人员 {victim_count} 人。"
+        "请救援小组按推荐路线执行并持续回传鸟瞰图。"
+    )
+    notification = storage.create_notification(
+        community_id=community["id"],
+        sender_user_id=user["id"],
+        title="火灾救援分析更新",
+        content=notice_content,
+        payload={"analysis_id": record["id"], "victim_count": victim_count},
+    )
+    notification.pop("payload_json", None)
+
+    await manager.broadcast_to_community(
+        community["id"],
+        {
+            "type": "fire_rescue_analysis",
+            "analysis": record,
+            "notification": notification,
+        },
+    )
+    await manager.broadcast_to_community(
+        community["id"],
+        {
+            "type": "community_alert",
+            "source": "COMMUNITY_ALERT",
+            "title": "火灾救援分析更新",
+            "content": notice_content,
+            "community_id": community["id"],
+            "notification": notification,
+        },
+    )
+
+    return {
+        "status": "success",
+        "analysis_status": ai_resp.get("status", "degraded"),
+        "analysis_error": ai_resp.get("error"),
+        "result": record,
+        "notification": notification,
+    }
+
+
+@app.get("/rescue/fire/analyses")
+async def list_fire_rescue_analyses(
+    limit: int = Query(default=20, ge=1, le=200),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    items = storage.list_fire_rescue_analyses(community_id=community["id"], limit=limit)
+    for item in items:
+        item.pop("image_urls_json", None)
+        item.pop("analysis_json", None)
+    return {"count": len(items), "items": items}
 
 
 @app.get("/reports/recent")
@@ -929,6 +1578,92 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 for item in items:
                     item.pop("payload_json", None)
                 await websocket.send_json({"type": "community_notifications", "items": items})
+            elif ptype == "fetch_chat_messages":
+                if not user or not user.get("community"):
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "source": "SYSTEM",
+                            "content": "请先登录后再查看社区聊天。",
+                        }
+                    )
+                    continue
+                limit = int(payload.get("limit", 100))
+                items = storage.list_chat_messages(
+                    community_id=user["community"]["id"],
+                    limit=max(1, min(limit, 500)),
+                )
+                for item in items:
+                    item.pop("metadata_json", None)
+                await websocket.send_json({"type": "community_chat_messages", "items": items})
+            elif ptype == "community_chat_send":
+                if not user or not user.get("community"):
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "source": "SYSTEM",
+                            "content": "请先登录后再发送社区聊天消息。",
+                        }
+                    )
+                    continue
+                content = str(payload.get("content", "")).strip()
+                ask_ai = bool(payload.get("ask_ai", False))
+                if not content:
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "source": "SYSTEM",
+                            "content": "消息内容不能为空。",
+                        }
+                    )
+                    continue
+                await create_and_broadcast_chat_message(
+                    community_id=user["community"]["id"],
+                    sender_user_id=user["id"],
+                    sender_name=user["display_name"],
+                    role="user",
+                    content=content,
+                )
+                if ask_ai:
+                    history = storage.list_chat_messages(
+                        community_id=user["community"]["id"], limit=40
+                    )
+                    ai_resp = run_community_assistant(
+                        community_id=user["community"]["id"],
+                        user_display_name=user["display_name"],
+                        question=content,
+                        recent_chat_messages=history,
+                    )
+                    await create_and_broadcast_chat_message(
+                        community_id=user["community"]["id"],
+                        sender_user_id=None,
+                        sender_name="社区AI助手",
+                        role="assistant",
+                        content=str(ai_resp.get("answer", "")),
+                        metadata={
+                            "status": ai_resp.get("status"),
+                            "error": ai_resp.get("error"),
+                        },
+                    )
+            elif ptype == "fetch_fire_rescue_analyses":
+                if not user or not user.get("community"):
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "source": "SYSTEM",
+                            "content": "请先登录后再查看火灾救援分析。",
+                        }
+                    )
+                    continue
+                limit = int(payload.get("limit", 20))
+                items = storage.list_fire_rescue_analyses(
+                    community_id=user["community"]["id"],
+                    limit=max(1, min(limit, 200)),
+                )
+                for item in items:
+                    item.pop("image_urls_json", None)
+                    item.pop("analysis_json", None)
+                await websocket.send_json({"type": "fire_rescue_analyses", "items": items})
             else:
                 await websocket.send_json(
                     {

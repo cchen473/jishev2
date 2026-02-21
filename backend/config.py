@@ -34,6 +34,18 @@ class Settings:
     )
     openai_base_url: str | None = os.getenv("OPENAI_BASE_URL")
 
+    yolo_model_path: Path = Path(
+        os.getenv("YOLO_MODEL_PATH", str(BASE_DIR / "models" / "yolo11n.onnx"))
+    ).resolve()
+    yolo_model_url: str = os.getenv(
+        "YOLO_MODEL_URL",
+        "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n.onnx",
+    )
+    yolo_input_size: int = int(os.getenv("YOLO_INPUT_SIZE", "640"))
+    yolo_confidence_threshold: float = float(os.getenv("YOLO_CONFIDENCE_THRESHOLD", "0.3"))
+    yolo_iou_threshold: float = float(os.getenv("YOLO_IOU_THRESHOLD", "0.45"))
+    yolo_max_detections: int = int(os.getenv("YOLO_MAX_DETECTIONS", "80"))
+
     auth_secret: str = os.getenv("AUTH_SECRET", "change-me-in-production")
     auth_token_exp_minutes: int = int(os.getenv("AUTH_TOKEN_EXP_MINUTES", "720"))
 
