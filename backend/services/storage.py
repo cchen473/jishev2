@@ -145,6 +145,311 @@ class Storage:
                         FOREIGN KEY(community_id) REFERENCES communities(id),
                         FOREIGN KEY(requester_user_id) REFERENCES users(id)
                     );
+
+                    CREATE INDEX IF NOT EXISTS idx_membership_user
+                    ON community_memberships(user_id);
+
+                    CREATE INDEX IF NOT EXISTS idx_membership_community
+                    ON community_memberships(community_id);
+
+                    CREATE INDEX IF NOT EXISTS idx_earthquake_reports_community_created
+                    ON earthquake_reports(community_id, created_at);
+
+                    CREATE INDEX IF NOT EXISTS idx_notifications_community_created
+                    ON community_notifications(community_id, created_at);
+
+                    CREATE INDEX IF NOT EXISTS idx_chat_messages_community_created
+                    ON community_chat_messages(community_id, created_at);
+
+                    CREATE INDEX IF NOT EXISTS idx_fire_rescue_community_created
+                    ON fire_rescue_analyses(community_id, created_at);
+
+                    CREATE TABLE IF NOT EXISTS incidents (
+                        id TEXT PRIMARY KEY,
+                        community_id TEXT NOT NULL,
+                        created_by_user_id TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        lat REAL,
+                        lng REAL,
+                        priority TEXT NOT NULL DEFAULT 'medium',
+                        status TEXT NOT NULL DEFAULT 'new',
+                        source TEXT NOT NULL DEFAULT 'manual',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY(community_id) REFERENCES communities(id),
+                        FOREIGN KEY(created_by_user_id) REFERENCES users(id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS incident_tasks (
+                        id TEXT PRIMARY KEY,
+                        incident_id TEXT NOT NULL,
+                        community_id TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'new',
+                        priority TEXT NOT NULL DEFAULT 'medium',
+                        assignee_user_id TEXT,
+                        team_id TEXT,
+                        due_at TEXT,
+                        accepted_at TEXT,
+                        completed_at TEXT,
+                        created_by_user_id TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY(incident_id) REFERENCES incidents(id),
+                        FOREIGN KEY(community_id) REFERENCES communities(id),
+                        FOREIGN KEY(assignee_user_id) REFERENCES users(id),
+                        FOREIGN KEY(created_by_user_id) REFERENCES users(id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS response_teams (
+                        id TEXT PRIMARY KEY,
+                        community_id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        specialty TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'standby',
+                        leader_user_id TEXT,
+                        contact TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY(community_id) REFERENCES communities(id),
+                        FOREIGN KEY(leader_user_id) REFERENCES users(id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS team_memberships (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        team_id TEXT NOT NULL,
+                        user_id TEXT NOT NULL,
+                        role TEXT NOT NULL DEFAULT 'member',
+                        created_at TEXT NOT NULL,
+                        UNIQUE(team_id, user_id),
+                        FOREIGN KEY(team_id) REFERENCES response_teams(id),
+                        FOREIGN KEY(user_id) REFERENCES users(id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS dispatch_records (
+                        id TEXT PRIMARY KEY,
+                        community_id TEXT NOT NULL,
+                        incident_id TEXT,
+                        task_id TEXT,
+                        team_id TEXT,
+                        resource_type TEXT NOT NULL,
+                        resource_name TEXT NOT NULL,
+                        quantity INTEGER NOT NULL DEFAULT 1,
+                        status TEXT NOT NULL DEFAULT 'allocated',
+                        notes TEXT,
+                        created_by_user_id TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY(community_id) REFERENCES communities(id),
+                        FOREIGN KEY(incident_id) REFERENCES incidents(id),
+                        FOREIGN KEY(task_id) REFERENCES incident_tasks(id),
+                        FOREIGN KEY(team_id) REFERENCES response_teams(id),
+                        FOREIGN KEY(created_by_user_id) REFERENCES users(id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS resident_checkins (
+                        id TEXT PRIMARY KEY,
+                        community_id TEXT NOT NULL,
+                        user_id TEXT,
+                        incident_id TEXT,
+                        subject_name TEXT NOT NULL,
+                        relation TEXT NOT NULL DEFAULT 'self',
+                        status TEXT NOT NULL,
+                        lat REAL,
+                        lng REAL,
+                        notes TEXT,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY(community_id) REFERENCES communities(id),
+                        FOREIGN KEY(user_id) REFERENCES users(id),
+                        FOREIGN KEY(incident_id) REFERENCES incidents(id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS missing_person_reports (
+                        id TEXT PRIMARY KEY,
+                        community_id TEXT NOT NULL,
+                        incident_id TEXT,
+                        reporter_user_id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        age INTEGER,
+                        contact TEXT,
+                        last_seen_location TEXT,
+                        priority TEXT NOT NULL DEFAULT 'medium',
+                        status TEXT NOT NULL DEFAULT 'open',
+                        notes TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY(community_id) REFERENCES communities(id),
+                        FOREIGN KEY(incident_id) REFERENCES incidents(id),
+                        FOREIGN KEY(reporter_user_id) REFERENCES users(id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS shelters (
+                        id TEXT PRIMARY KEY,
+                        community_id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        address TEXT NOT NULL,
+                        lat REAL,
+                        lng REAL,
+                        capacity INTEGER NOT NULL,
+                        current_occupancy INTEGER NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL DEFAULT 'open',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY(community_id) REFERENCES communities(id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS shelter_occupancy_events (
+                        id TEXT PRIMARY KEY,
+                        shelter_id TEXT NOT NULL,
+                        community_id TEXT NOT NULL,
+                        delta INTEGER NOT NULL,
+                        occupancy INTEGER NOT NULL,
+                        reason TEXT,
+                        created_by_user_id TEXT,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY(shelter_id) REFERENCES shelters(id),
+                        FOREIGN KEY(community_id) REFERENCES communities(id),
+                        FOREIGN KEY(created_by_user_id) REFERENCES users(id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS hazard_zones (
+                        id TEXT PRIMARY KEY,
+                        community_id TEXT NOT NULL,
+                        incident_id TEXT,
+                        name TEXT NOT NULL,
+                        risk_level TEXT NOT NULL DEFAULT 'medium',
+                        zone_type TEXT NOT NULL DEFAULT 'hazard',
+                        polygon_json TEXT NOT NULL,
+                        notes TEXT,
+                        status TEXT NOT NULL DEFAULT 'active',
+                        created_by_user_id TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY(community_id) REFERENCES communities(id),
+                        FOREIGN KEY(incident_id) REFERENCES incidents(id),
+                        FOREIGN KEY(created_by_user_id) REFERENCES users(id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS road_blocks (
+                        id TEXT PRIMARY KEY,
+                        community_id TEXT NOT NULL,
+                        incident_id TEXT,
+                        title TEXT NOT NULL,
+                        details TEXT,
+                        lat REAL,
+                        lng REAL,
+                        severity TEXT NOT NULL DEFAULT 'medium',
+                        status TEXT NOT NULL DEFAULT 'active',
+                        created_by_user_id TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY(community_id) REFERENCES communities(id),
+                        FOREIGN KEY(incident_id) REFERENCES incidents(id),
+                        FOREIGN KEY(created_by_user_id) REFERENCES users(id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS community_notification_templates (
+                        id TEXT PRIMARY KEY,
+                        community_id TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        level TEXT NOT NULL DEFAULT 'info',
+                        title_template TEXT NOT NULL,
+                        content_template TEXT NOT NULL,
+                        created_by_user_id TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY(community_id) REFERENCES communities(id),
+                        FOREIGN KEY(created_by_user_id) REFERENCES users(id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS notification_receipts (
+                        id TEXT PRIMARY KEY,
+                        notification_id TEXT NOT NULL,
+                        community_id TEXT NOT NULL,
+                        user_id TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'read',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE(notification_id, user_id),
+                        FOREIGN KEY(notification_id) REFERENCES community_notifications(id),
+                        FOREIGN KEY(community_id) REFERENCES communities(id),
+                        FOREIGN KEY(user_id) REFERENCES users(id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS audit_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        community_id TEXT NOT NULL,
+                        user_id TEXT,
+                        action TEXT NOT NULL,
+                        target_type TEXT NOT NULL,
+                        target_id TEXT,
+                        detail_json TEXT,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY(community_id) REFERENCES communities(id),
+                        FOREIGN KEY(user_id) REFERENCES users(id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS ops_timeline_events (
+                        id TEXT PRIMARY KEY,
+                        community_id TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        entity_type TEXT,
+                        entity_id TEXT,
+                        payload_json TEXT,
+                        created_by_user_id TEXT,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY(community_id) REFERENCES communities(id),
+                        FOREIGN KEY(created_by_user_id) REFERENCES users(id)
+                    );
+
+                    CREATE INDEX IF NOT EXISTS idx_incidents_community_created
+                    ON incidents(community_id, created_at);
+
+                    CREATE INDEX IF NOT EXISTS idx_tasks_community_created
+                    ON incident_tasks(community_id, created_at);
+
+                    CREATE INDEX IF NOT EXISTS idx_tasks_incident_status_priority
+                    ON incident_tasks(incident_id, status, priority);
+
+                    CREATE INDEX IF NOT EXISTS idx_dispatch_community_created
+                    ON dispatch_records(community_id, created_at);
+
+                    CREATE INDEX IF NOT EXISTS idx_checkins_community_created
+                    ON resident_checkins(community_id, created_at);
+
+                    CREATE INDEX IF NOT EXISTS idx_checkins_user_created
+                    ON resident_checkins(user_id, created_at);
+
+                    CREATE INDEX IF NOT EXISTS idx_missing_community_created
+                    ON missing_person_reports(community_id, created_at);
+
+                    CREATE INDEX IF NOT EXISTS idx_shelters_community_created
+                    ON shelters(community_id, created_at);
+
+                    CREATE INDEX IF NOT EXISTS idx_shelter_events_shelter_created
+                    ON shelter_occupancy_events(shelter_id, created_at);
+
+                    CREATE INDEX IF NOT EXISTS idx_hazard_zones_community_created
+                    ON hazard_zones(community_id, created_at);
+
+                    CREATE INDEX IF NOT EXISTS idx_road_blocks_community_created
+                    ON road_blocks(community_id, created_at);
+
+                    CREATE INDEX IF NOT EXISTS idx_templates_community_created
+                    ON community_notification_templates(community_id, created_at);
+
+                    CREATE INDEX IF NOT EXISTS idx_receipts_notification_status
+                    ON notification_receipts(notification_id, status);
+
+                    CREATE INDEX IF NOT EXISTS idx_audit_community_created
+                    ON audit_logs(community_id, created_at);
+
+                    CREATE INDEX IF NOT EXISTS idx_timeline_community_created
+                    ON ops_timeline_events(community_id, created_at);
                     """
                 )
                 conn.commit()
@@ -732,6 +1037,49 @@ class Storage:
                 running_missions = conn.execute(
                     "SELECT COUNT(*) as count FROM missions WHERE status = 'running'"
                 ).fetchone()
+                if community_id:
+                    incident_total = conn.execute(
+                        """
+                        SELECT COUNT(*) as count
+                        FROM incidents
+                        WHERE community_id = ?
+                        """,
+                        (community_id,),
+                    ).fetchone()
+                    task_running = conn.execute(
+                        """
+                        SELECT COUNT(*) as count
+                        FROM incident_tasks
+                        WHERE community_id = ? AND status IN ('assigned', 'accepted', 'in_progress', 'blocked')
+                        """,
+                        (community_id,),
+                    ).fetchone()
+                    need_help = conn.execute(
+                        """
+                        SELECT COUNT(*) as count
+                        FROM resident_checkins
+                        WHERE community_id = ? AND status = 'need_help'
+                        """,
+                        (community_id,),
+                    ).fetchone()
+                else:
+                    incident_total = conn.execute(
+                        "SELECT COUNT(*) as count FROM incidents"
+                    ).fetchone()
+                    task_running = conn.execute(
+                        """
+                        SELECT COUNT(*) as count
+                        FROM incident_tasks
+                        WHERE status IN ('assigned', 'accepted', 'in_progress', 'blocked')
+                        """
+                    ).fetchone()
+                    need_help = conn.execute(
+                        """
+                        SELECT COUNT(*) as count
+                        FROM resident_checkins
+                        WHERE status = 'need_help'
+                        """
+                    ).fetchone()
 
         latest = dict(latest_report) if latest_report else None
         if latest:
@@ -742,4 +1090,1303 @@ class Storage:
             "active_missions": int(running_missions["count"]) if running_missions else 0,
             "report_counts": {"earthquake": int(total_reports["count"]) if total_reports else 0},
             "latest_report": latest,
+            "total_incidents": int(incident_total["count"]) if incident_total else 0,
+            "active_tasks": int(task_running["count"]) if task_running else 0,
+            "residents_need_help": int(need_help["count"]) if need_help else 0,
         }
+
+    def create_incident(
+        self,
+        *,
+        community_id: str,
+        created_by_user_id: str,
+        title: str,
+        description: str,
+        lat: float | None,
+        lng: float | None,
+        priority: str,
+        status: str = "new",
+        source: str = "manual",
+    ) -> dict[str, Any]:
+        now = utc_now()
+        record = {
+            "id": uuid.uuid4().hex,
+            "community_id": community_id,
+            "created_by_user_id": created_by_user_id,
+            "title": title.strip(),
+            "description": description.strip(),
+            "lat": lat,
+            "lng": lng,
+            "priority": priority,
+            "status": status,
+            "source": source,
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO incidents (
+                        id, community_id, created_by_user_id, title, description, lat, lng,
+                        priority, status, source, created_at, updated_at
+                    )
+                    VALUES (
+                        :id, :community_id, :created_by_user_id, :title, :description, :lat, :lng,
+                        :priority, :status, :source, :created_at, :updated_at
+                    )
+                    """,
+                    record,
+                )
+                conn.commit()
+        return record
+
+    def get_incident(self, incident_id: str, community_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT
+                        i.id, i.community_id, i.created_by_user_id, i.title, i.description,
+                        i.lat, i.lng, i.priority, i.status, i.source, i.created_at, i.updated_at,
+                        u.display_name as created_by_name
+                    FROM incidents i
+                    LEFT JOIN users u ON u.id = i.created_by_user_id
+                    WHERE i.id = ? AND i.community_id = ?
+                    LIMIT 1
+                    """,
+                    (incident_id, community_id),
+                ).fetchone()
+        return dict(row) if row else None
+
+    def list_incidents(self, *, community_id: str, limit: int = 80) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 300)
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        i.id, i.community_id, i.created_by_user_id, i.title, i.description,
+                        i.lat, i.lng, i.priority, i.status, i.source, i.created_at, i.updated_at,
+                        u.display_name as created_by_name
+                    FROM incidents i
+                    LEFT JOIN users u ON u.id = i.created_by_user_id
+                    WHERE i.community_id = ?
+                    ORDER BY i.created_at DESC
+                    LIMIT ?
+                    """,
+                    (community_id, safe_limit),
+                ).fetchall()
+        items = [dict(row) for row in rows]
+        items.reverse()
+        return items
+
+    def update_incident(
+        self,
+        *,
+        incident_id: str,
+        community_id: str,
+        title: str | None = None,
+        description: str | None = None,
+        priority: str | None = None,
+        status: str | None = None,
+        lat: float | None = None,
+        lng: float | None = None,
+    ) -> dict[str, Any] | None:
+        updates: dict[str, Any] = {}
+        if title is not None:
+            updates["title"] = title.strip()
+        if description is not None:
+            updates["description"] = description.strip()
+        if priority is not None:
+            updates["priority"] = priority
+        if status is not None:
+            updates["status"] = status
+        if lat is not None:
+            updates["lat"] = lat
+        if lng is not None:
+            updates["lng"] = lng
+        if not updates:
+            return self.get_incident(incident_id, community_id)
+
+        updates["updated_at"] = utc_now()
+        assignments = ", ".join(f"{key} = :{key}" for key in updates.keys())
+        payload = {"incident_id": incident_id, "community_id": community_id, **updates}
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    f"""
+                    UPDATE incidents
+                    SET {assignments}
+                    WHERE id = :incident_id AND community_id = :community_id
+                    """,
+                    payload,
+                )
+                conn.commit()
+        return self.get_incident(incident_id, community_id)
+
+    def create_incident_task(
+        self,
+        *,
+        incident_id: str,
+        community_id: str,
+        title: str,
+        description: str,
+        status: str,
+        priority: str,
+        assignee_user_id: str | None,
+        team_id: str | None,
+        due_at: str | None,
+        created_by_user_id: str,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        record = {
+            "id": uuid.uuid4().hex,
+            "incident_id": incident_id,
+            "community_id": community_id,
+            "title": title.strip(),
+            "description": description.strip(),
+            "status": status,
+            "priority": priority,
+            "assignee_user_id": assignee_user_id,
+            "team_id": team_id,
+            "due_at": due_at,
+            "accepted_at": None,
+            "completed_at": None,
+            "created_by_user_id": created_by_user_id,
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO incident_tasks (
+                        id, incident_id, community_id, title, description, status, priority,
+                        assignee_user_id, team_id, due_at, accepted_at, completed_at,
+                        created_by_user_id, created_at, updated_at
+                    )
+                    VALUES (
+                        :id, :incident_id, :community_id, :title, :description, :status, :priority,
+                        :assignee_user_id, :team_id, :due_at, :accepted_at, :completed_at,
+                        :created_by_user_id, :created_at, :updated_at
+                    )
+                    """,
+                    record,
+                )
+                conn.commit()
+        return record
+
+    def get_task(self, task_id: str, community_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT
+                        t.id, t.incident_id, t.community_id, t.title, t.description, t.status, t.priority,
+                        t.assignee_user_id, t.team_id, t.due_at, t.accepted_at, t.completed_at,
+                        t.created_by_user_id, t.created_at, t.updated_at,
+                        creator.display_name as created_by_name,
+                        assignee.display_name as assignee_name,
+                        team.name as team_name
+                    FROM incident_tasks t
+                    LEFT JOIN users creator ON creator.id = t.created_by_user_id
+                    LEFT JOIN users assignee ON assignee.id = t.assignee_user_id
+                    LEFT JOIN response_teams team ON team.id = t.team_id
+                    WHERE t.id = ? AND t.community_id = ?
+                    LIMIT 1
+                    """,
+                    (task_id, community_id),
+                ).fetchone()
+        return dict(row) if row else None
+
+    def list_tasks(
+        self,
+        *,
+        community_id: str,
+        limit: int = 160,
+        incident_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 500)
+        with self._lock:
+            with self._connect() as conn:
+                if incident_id:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            t.id, t.incident_id, t.community_id, t.title, t.description, t.status, t.priority,
+                            t.assignee_user_id, t.team_id, t.due_at, t.accepted_at, t.completed_at,
+                            t.created_by_user_id, t.created_at, t.updated_at,
+                            creator.display_name as created_by_name,
+                            assignee.display_name as assignee_name,
+                            team.name as team_name
+                        FROM incident_tasks t
+                        LEFT JOIN users creator ON creator.id = t.created_by_user_id
+                        LEFT JOIN users assignee ON assignee.id = t.assignee_user_id
+                        LEFT JOIN response_teams team ON team.id = t.team_id
+                        WHERE t.community_id = ? AND t.incident_id = ?
+                        ORDER BY t.created_at DESC
+                        LIMIT ?
+                        """,
+                        (community_id, incident_id, safe_limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            t.id, t.incident_id, t.community_id, t.title, t.description, t.status, t.priority,
+                            t.assignee_user_id, t.team_id, t.due_at, t.accepted_at, t.completed_at,
+                            t.created_by_user_id, t.created_at, t.updated_at,
+                            creator.display_name as created_by_name,
+                            assignee.display_name as assignee_name,
+                            team.name as team_name
+                        FROM incident_tasks t
+                        LEFT JOIN users creator ON creator.id = t.created_by_user_id
+                        LEFT JOIN users assignee ON assignee.id = t.assignee_user_id
+                        LEFT JOIN response_teams team ON team.id = t.team_id
+                        WHERE t.community_id = ?
+                        ORDER BY t.created_at DESC
+                        LIMIT ?
+                        """,
+                        (community_id, safe_limit),
+                    ).fetchall()
+        items = [dict(row) for row in rows]
+        items.reverse()
+        return items
+
+    def update_task(
+        self,
+        *,
+        task_id: str,
+        community_id: str,
+        status: str | None = None,
+        priority: str | None = None,
+        assignee_user_id: str | None = None,
+        team_id: str | None = None,
+        due_at: str | None = None,
+        title: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any] | None:
+        updates: dict[str, Any] = {}
+        if status is not None:
+            updates["status"] = status
+            if status == "accepted":
+                updates["accepted_at"] = utc_now()
+            if status == "completed":
+                updates["completed_at"] = utc_now()
+        if priority is not None:
+            updates["priority"] = priority
+        if assignee_user_id is not None:
+            updates["assignee_user_id"] = assignee_user_id
+        if team_id is not None:
+            updates["team_id"] = team_id
+        if due_at is not None:
+            updates["due_at"] = due_at
+        if title is not None:
+            updates["title"] = title.strip()
+        if description is not None:
+            updates["description"] = description.strip()
+        if not updates:
+            return self.get_task(task_id, community_id)
+        updates["updated_at"] = utc_now()
+        assignments = ", ".join(f"{key} = :{key}" for key in updates.keys())
+        payload = {"task_id": task_id, "community_id": community_id, **updates}
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    f"""
+                    UPDATE incident_tasks
+                    SET {assignments}
+                    WHERE id = :task_id AND community_id = :community_id
+                    """,
+                    payload,
+                )
+                conn.commit()
+        return self.get_task(task_id, community_id)
+
+    def create_response_team(
+        self,
+        *,
+        community_id: str,
+        name: str,
+        specialty: str,
+        status: str,
+        leader_user_id: str | None,
+        contact: str | None,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        record = {
+            "id": uuid.uuid4().hex,
+            "community_id": community_id,
+            "name": name.strip(),
+            "specialty": specialty.strip(),
+            "status": status,
+            "leader_user_id": leader_user_id,
+            "contact": (contact or "").strip() or None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO response_teams (
+                        id, community_id, name, specialty, status, leader_user_id, contact, created_at, updated_at
+                    )
+                    VALUES (
+                        :id, :community_id, :name, :specialty, :status, :leader_user_id, :contact, :created_at, :updated_at
+                    )
+                    """,
+                    record,
+                )
+                conn.commit()
+        return record
+
+    def add_team_member(self, *, team_id: str, user_id: str, role: str = "member") -> dict[str, Any]:
+        record = {
+            "team_id": team_id,
+            "user_id": user_id,
+            "role": role,
+            "created_at": utc_now(),
+        }
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO team_memberships (team_id, user_id, role, created_at)
+                    VALUES (:team_id, :user_id, :role, :created_at)
+                    """,
+                    record,
+                )
+                conn.commit()
+                row = conn.execute(
+                    """
+                    SELECT id, team_id, user_id, role, created_at
+                    FROM team_memberships
+                    WHERE team_id = ? AND user_id = ?
+                    LIMIT 1
+                    """,
+                    (team_id, user_id),
+                ).fetchone()
+        return dict(row) if row else record
+
+    def list_response_teams(self, *, community_id: str, limit: int = 120) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 300)
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        t.id, t.community_id, t.name, t.specialty, t.status,
+                        t.leader_user_id, t.contact, t.created_at, t.updated_at,
+                        u.display_name as leader_name,
+                        (
+                            SELECT COUNT(*)
+                            FROM team_memberships m
+                            WHERE m.team_id = t.id
+                        ) as member_count
+                    FROM response_teams t
+                    LEFT JOIN users u ON u.id = t.leader_user_id
+                    WHERE t.community_id = ?
+                    ORDER BY t.created_at DESC
+                    LIMIT ?
+                    """,
+                    (community_id, safe_limit),
+                ).fetchall()
+        items = [dict(row) for row in rows]
+        items.reverse()
+        return items
+
+    def create_dispatch_record(
+        self,
+        *,
+        community_id: str,
+        created_by_user_id: str,
+        incident_id: str | None,
+        task_id: str | None,
+        team_id: str | None,
+        resource_type: str,
+        resource_name: str,
+        quantity: int,
+        status: str,
+        notes: str | None,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        record = {
+            "id": uuid.uuid4().hex,
+            "community_id": community_id,
+            "incident_id": incident_id,
+            "task_id": task_id,
+            "team_id": team_id,
+            "resource_type": resource_type.strip(),
+            "resource_name": resource_name.strip(),
+            "quantity": max(1, int(quantity)),
+            "status": status,
+            "notes": (notes or "").strip() or None,
+            "created_by_user_id": created_by_user_id,
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO dispatch_records (
+                        id, community_id, incident_id, task_id, team_id, resource_type, resource_name,
+                        quantity, status, notes, created_by_user_id, created_at, updated_at
+                    )
+                    VALUES (
+                        :id, :community_id, :incident_id, :task_id, :team_id, :resource_type, :resource_name,
+                        :quantity, :status, :notes, :created_by_user_id, :created_at, :updated_at
+                    )
+                    """,
+                    record,
+                )
+                conn.commit()
+        return record
+
+    def list_dispatch_records(
+        self, *, community_id: str, limit: int = 150, incident_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 400)
+        with self._lock:
+            with self._connect() as conn:
+                if incident_id:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            d.id, d.community_id, d.incident_id, d.task_id, d.team_id, d.resource_type,
+                            d.resource_name, d.quantity, d.status, d.notes, d.created_by_user_id,
+                            d.created_at, d.updated_at, u.display_name as created_by_name,
+                            t.name as team_name
+                        FROM dispatch_records d
+                        LEFT JOIN users u ON u.id = d.created_by_user_id
+                        LEFT JOIN response_teams t ON t.id = d.team_id
+                        WHERE d.community_id = ? AND d.incident_id = ?
+                        ORDER BY d.created_at DESC
+                        LIMIT ?
+                        """,
+                        (community_id, incident_id, safe_limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            d.id, d.community_id, d.incident_id, d.task_id, d.team_id, d.resource_type,
+                            d.resource_name, d.quantity, d.status, d.notes, d.created_by_user_id,
+                            d.created_at, d.updated_at, u.display_name as created_by_name,
+                            t.name as team_name
+                        FROM dispatch_records d
+                        LEFT JOIN users u ON u.id = d.created_by_user_id
+                        LEFT JOIN response_teams t ON t.id = d.team_id
+                        WHERE d.community_id = ?
+                        ORDER BY d.created_at DESC
+                        LIMIT ?
+                        """,
+                        (community_id, safe_limit),
+                    ).fetchall()
+        items = [dict(row) for row in rows]
+        items.reverse()
+        return items
+
+    def add_resident_checkin(
+        self,
+        *,
+        community_id: str,
+        user_id: str | None,
+        incident_id: str | None,
+        subject_name: str,
+        relation: str,
+        status: str,
+        lat: float | None,
+        lng: float | None,
+        notes: str | None,
+    ) -> dict[str, Any]:
+        record = {
+            "id": uuid.uuid4().hex,
+            "community_id": community_id,
+            "user_id": user_id,
+            "incident_id": incident_id,
+            "subject_name": subject_name.strip(),
+            "relation": relation.strip(),
+            "status": status,
+            "lat": lat,
+            "lng": lng,
+            "notes": (notes or "").strip() or None,
+            "created_at": utc_now(),
+        }
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO resident_checkins (
+                        id, community_id, user_id, incident_id, subject_name, relation, status,
+                        lat, lng, notes, created_at
+                    )
+                    VALUES (
+                        :id, :community_id, :user_id, :incident_id, :subject_name, :relation, :status,
+                        :lat, :lng, :notes, :created_at
+                    )
+                    """,
+                    record,
+                )
+                conn.commit()
+        return record
+
+    def list_resident_checkins(
+        self, *, community_id: str, limit: int = 150, incident_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 500)
+        with self._lock:
+            with self._connect() as conn:
+                if incident_id:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            c.id, c.community_id, c.user_id, c.incident_id, c.subject_name, c.relation, c.status,
+                            c.lat, c.lng, c.notes, c.created_at, u.display_name as user_name
+                        FROM resident_checkins c
+                        LEFT JOIN users u ON u.id = c.user_id
+                        WHERE c.community_id = ? AND c.incident_id = ?
+                        ORDER BY c.created_at DESC
+                        LIMIT ?
+                        """,
+                        (community_id, incident_id, safe_limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            c.id, c.community_id, c.user_id, c.incident_id, c.subject_name, c.relation, c.status,
+                            c.lat, c.lng, c.notes, c.created_at, u.display_name as user_name
+                        FROM resident_checkins c
+                        LEFT JOIN users u ON u.id = c.user_id
+                        WHERE c.community_id = ?
+                        ORDER BY c.created_at DESC
+                        LIMIT ?
+                        """,
+                        (community_id, safe_limit),
+                    ).fetchall()
+        items = [dict(row) for row in rows]
+        items.reverse()
+        return items
+
+    def summarize_resident_checkins(self, *, community_id: str) -> dict[str, Any]:
+        with self._lock:
+            with self._connect() as conn:
+                total_row = conn.execute(
+                    """
+                    SELECT COUNT(*) as count
+                    FROM resident_checkins
+                    WHERE community_id = ?
+                    """,
+                    (community_id,),
+                ).fetchone()
+                grouped = conn.execute(
+                    """
+                    SELECT status, COUNT(*) as count
+                    FROM resident_checkins
+                    WHERE community_id = ?
+                    GROUP BY status
+                    """,
+                    (community_id,),
+                ).fetchall()
+                latest_row = conn.execute(
+                    """
+                    SELECT created_at
+                    FROM resident_checkins
+                    WHERE community_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (community_id,),
+                ).fetchone()
+        by_status = {str(row["status"]): int(row["count"]) for row in grouped}
+        return {
+            "community_id": community_id,
+            "total": int(total_row["count"]) if total_row else 0,
+            "by_status": by_status,
+            "latest_checkin_at": latest_row["created_at"] if latest_row else None,
+        }
+
+    def create_missing_person_report(
+        self,
+        *,
+        community_id: str,
+        incident_id: str | None,
+        reporter_user_id: str,
+        name: str,
+        age: int | None,
+        contact: str | None,
+        last_seen_location: str | None,
+        priority: str,
+        status: str,
+        notes: str | None,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        record = {
+            "id": uuid.uuid4().hex,
+            "community_id": community_id,
+            "incident_id": incident_id,
+            "reporter_user_id": reporter_user_id,
+            "name": name.strip(),
+            "age": age,
+            "contact": (contact or "").strip() or None,
+            "last_seen_location": (last_seen_location or "").strip() or None,
+            "priority": priority,
+            "status": status,
+            "notes": (notes or "").strip() or None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO missing_person_reports (
+                        id, community_id, incident_id, reporter_user_id, name, age, contact,
+                        last_seen_location, priority, status, notes, created_at, updated_at
+                    )
+                    VALUES (
+                        :id, :community_id, :incident_id, :reporter_user_id, :name, :age, :contact,
+                        :last_seen_location, :priority, :status, :notes, :created_at, :updated_at
+                    )
+                    """,
+                    record,
+                )
+                conn.commit()
+        return record
+
+    def list_missing_person_reports(
+        self, *, community_id: str, limit: int = 150, status: str | None = None
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 400)
+        with self._lock:
+            with self._connect() as conn:
+                if status:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            m.id, m.community_id, m.incident_id, m.reporter_user_id, m.name, m.age,
+                            m.contact, m.last_seen_location, m.priority, m.status, m.notes,
+                            m.created_at, m.updated_at, u.display_name as reporter_name
+                        FROM missing_person_reports m
+                        LEFT JOIN users u ON u.id = m.reporter_user_id
+                        WHERE m.community_id = ? AND m.status = ?
+                        ORDER BY m.created_at DESC
+                        LIMIT ?
+                        """,
+                        (community_id, status, safe_limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            m.id, m.community_id, m.incident_id, m.reporter_user_id, m.name, m.age,
+                            m.contact, m.last_seen_location, m.priority, m.status, m.notes,
+                            m.created_at, m.updated_at, u.display_name as reporter_name
+                        FROM missing_person_reports m
+                        LEFT JOIN users u ON u.id = m.reporter_user_id
+                        WHERE m.community_id = ?
+                        ORDER BY m.created_at DESC
+                        LIMIT ?
+                        """,
+                        (community_id, safe_limit),
+                    ).fetchall()
+        items = [dict(row) for row in rows]
+        items.reverse()
+        return items
+
+    def create_shelter(
+        self,
+        *,
+        community_id: str,
+        name: str,
+        address: str,
+        lat: float | None,
+        lng: float | None,
+        capacity: int,
+        current_occupancy: int = 0,
+        status: str = "open",
+    ) -> dict[str, Any]:
+        now = utc_now()
+        normalized_capacity = max(1, int(capacity))
+        normalized_occupancy = max(0, min(int(current_occupancy), normalized_capacity))
+        record = {
+            "id": uuid.uuid4().hex,
+            "community_id": community_id,
+            "name": name.strip(),
+            "address": address.strip(),
+            "lat": lat,
+            "lng": lng,
+            "capacity": normalized_capacity,
+            "current_occupancy": normalized_occupancy,
+            "status": status,
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO shelters (
+                        id, community_id, name, address, lat, lng, capacity, current_occupancy, status, created_at, updated_at
+                    )
+                    VALUES (
+                        :id, :community_id, :name, :address, :lat, :lng, :capacity, :current_occupancy, :status, :created_at, :updated_at
+                    )
+                    """,
+                    record,
+                )
+                conn.commit()
+        return record
+
+    def get_shelter(self, shelter_id: str, community_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT
+                        id, community_id, name, address, lat, lng, capacity,
+                        current_occupancy, status, created_at, updated_at
+                    FROM shelters
+                    WHERE id = ? AND community_id = ?
+                    LIMIT 1
+                    """,
+                    (shelter_id, community_id),
+                ).fetchone()
+        return dict(row) if row else None
+
+    def list_shelters(self, *, community_id: str, limit: int = 120) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 300)
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        id, community_id, name, address, lat, lng, capacity,
+                        current_occupancy, status, created_at, updated_at
+                    FROM shelters
+                    WHERE community_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (community_id, safe_limit),
+                ).fetchall()
+        items = [dict(row) for row in rows]
+        items.reverse()
+        return items
+
+    def add_shelter_occupancy_event(
+        self,
+        *,
+        shelter_id: str,
+        community_id: str,
+        delta: int,
+        occupancy: int,
+        reason: str | None,
+        created_by_user_id: str | None,
+    ) -> dict[str, Any]:
+        event = {
+            "id": uuid.uuid4().hex,
+            "shelter_id": shelter_id,
+            "community_id": community_id,
+            "delta": int(delta),
+            "occupancy": int(occupancy),
+            "reason": (reason or "").strip() or None,
+            "created_by_user_id": created_by_user_id,
+            "created_at": utc_now(),
+        }
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO shelter_occupancy_events (
+                        id, shelter_id, community_id, delta, occupancy, reason, created_by_user_id, created_at
+                    )
+                    VALUES (
+                        :id, :shelter_id, :community_id, :delta, :occupancy, :reason, :created_by_user_id, :created_at
+                    )
+                    """,
+                    event,
+                )
+                conn.commit()
+        return event
+
+    def update_shelter_occupancy(
+        self,
+        *,
+        shelter_id: str,
+        community_id: str,
+        delta: int | None = None,
+        absolute_occupancy: int | None = None,
+        status: str | None = None,
+        reason: str | None = None,
+        created_by_user_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        shelter = self.get_shelter(shelter_id, community_id)
+        if shelter is None:
+            return None
+        capacity = int(shelter.get("capacity") or 0)
+        current = int(shelter.get("current_occupancy") or 0)
+        if absolute_occupancy is not None:
+            next_occupancy = absolute_occupancy
+            real_delta = absolute_occupancy - current
+        else:
+            real_delta = int(delta or 0)
+            next_occupancy = current + real_delta
+        next_occupancy = max(0, min(next_occupancy, capacity if capacity > 0 else next_occupancy))
+        updates: dict[str, Any] = {"current_occupancy": next_occupancy, "updated_at": utc_now()}
+        if status is not None:
+            updates["status"] = status
+        assignments = ", ".join(f"{key} = :{key}" for key in updates.keys())
+        payload = {"shelter_id": shelter_id, "community_id": community_id, **updates}
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    f"""
+                    UPDATE shelters
+                    SET {assignments}
+                    WHERE id = :shelter_id AND community_id = :community_id
+                    """,
+                    payload,
+                )
+                conn.commit()
+        self.add_shelter_occupancy_event(
+            shelter_id=shelter_id,
+            community_id=community_id,
+            delta=real_delta,
+            occupancy=next_occupancy,
+            reason=reason,
+            created_by_user_id=created_by_user_id,
+        )
+        return self.get_shelter(shelter_id, community_id)
+
+    def create_hazard_zone(
+        self,
+        *,
+        community_id: str,
+        incident_id: str | None,
+        name: str,
+        risk_level: str,
+        zone_type: str,
+        polygon: list[dict[str, float]],
+        notes: str | None,
+        status: str,
+        created_by_user_id: str,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        record = {
+            "id": uuid.uuid4().hex,
+            "community_id": community_id,
+            "incident_id": incident_id,
+            "name": name.strip(),
+            "risk_level": risk_level,
+            "zone_type": zone_type,
+            "polygon_json": json.dumps(polygon, ensure_ascii=False),
+            "notes": (notes or "").strip() or None,
+            "status": status,
+            "created_by_user_id": created_by_user_id,
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO hazard_zones (
+                        id, community_id, incident_id, name, risk_level, zone_type, polygon_json,
+                        notes, status, created_by_user_id, created_at, updated_at
+                    )
+                    VALUES (
+                        :id, :community_id, :incident_id, :name, :risk_level, :zone_type, :polygon_json,
+                        :notes, :status, :created_by_user_id, :created_at, :updated_at
+                    )
+                    """,
+                    record,
+                )
+                conn.commit()
+        payload = {**record}
+        payload["polygon"] = polygon
+        return payload
+
+    def list_hazard_zones(
+        self, *, community_id: str, limit: int = 120, incident_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 300)
+        with self._lock:
+            with self._connect() as conn:
+                if incident_id:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            id, community_id, incident_id, name, risk_level, zone_type, polygon_json, notes,
+                            status, created_by_user_id, created_at, updated_at
+                        FROM hazard_zones
+                        WHERE community_id = ? AND incident_id = ?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                        """,
+                        (community_id, incident_id, safe_limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            id, community_id, incident_id, name, risk_level, zone_type, polygon_json, notes,
+                            status, created_by_user_id, created_at, updated_at
+                        FROM hazard_zones
+                        WHERE community_id = ?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                        """,
+                        (community_id, safe_limit),
+                    ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["polygon"] = self._safe_load_json(item.get("polygon_json")) or []
+            items.append(item)
+        items.reverse()
+        return items
+
+    def create_road_block(
+        self,
+        *,
+        community_id: str,
+        incident_id: str | None,
+        title: str,
+        details: str | None,
+        lat: float | None,
+        lng: float | None,
+        severity: str,
+        status: str,
+        created_by_user_id: str,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        record = {
+            "id": uuid.uuid4().hex,
+            "community_id": community_id,
+            "incident_id": incident_id,
+            "title": title.strip(),
+            "details": (details or "").strip() or None,
+            "lat": lat,
+            "lng": lng,
+            "severity": severity,
+            "status": status,
+            "created_by_user_id": created_by_user_id,
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO road_blocks (
+                        id, community_id, incident_id, title, details, lat, lng, severity, status,
+                        created_by_user_id, created_at, updated_at
+                    )
+                    VALUES (
+                        :id, :community_id, :incident_id, :title, :details, :lat, :lng, :severity, :status,
+                        :created_by_user_id, :created_at, :updated_at
+                    )
+                    """,
+                    record,
+                )
+                conn.commit()
+        return record
+
+    def list_road_blocks(
+        self, *, community_id: str, limit: int = 120, incident_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 300)
+        with self._lock:
+            with self._connect() as conn:
+                if incident_id:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            id, community_id, incident_id, title, details, lat, lng, severity, status,
+                            created_by_user_id, created_at, updated_at
+                        FROM road_blocks
+                        WHERE community_id = ? AND incident_id = ?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                        """,
+                        (community_id, incident_id, safe_limit),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT
+                            id, community_id, incident_id, title, details, lat, lng, severity, status,
+                            created_by_user_id, created_at, updated_at
+                        FROM road_blocks
+                        WHERE community_id = ?
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                        """,
+                        (community_id, safe_limit),
+                    ).fetchall()
+        items = [dict(row) for row in rows]
+        items.reverse()
+        return items
+
+    def create_notification_template(
+        self,
+        *,
+        community_id: str,
+        name: str,
+        level: str,
+        title_template: str,
+        content_template: str,
+        created_by_user_id: str,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        record = {
+            "id": uuid.uuid4().hex,
+            "community_id": community_id,
+            "name": name.strip(),
+            "level": level,
+            "title_template": title_template.strip(),
+            "content_template": content_template.strip(),
+            "created_by_user_id": created_by_user_id,
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO community_notification_templates (
+                        id, community_id, name, level, title_template, content_template,
+                        created_by_user_id, created_at, updated_at
+                    )
+                    VALUES (
+                        :id, :community_id, :name, :level, :title_template, :content_template,
+                        :created_by_user_id, :created_at, :updated_at
+                    )
+                    """,
+                    record,
+                )
+                conn.commit()
+        return record
+
+    def list_notification_templates(
+        self, *, community_id: str, limit: int = 80
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 200)
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        id, community_id, name, level, title_template, content_template,
+                        created_by_user_id, created_at, updated_at
+                    FROM community_notification_templates
+                    WHERE community_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (community_id, safe_limit),
+                ).fetchall()
+        items = [dict(row) for row in rows]
+        items.reverse()
+        return items
+
+    def upsert_notification_receipt(
+        self,
+        *,
+        notification_id: str,
+        community_id: str,
+        user_id: str,
+        status: str,
+    ) -> dict[str, Any]:
+        now = utc_now()
+        record = {
+            "id": uuid.uuid4().hex,
+            "notification_id": notification_id,
+            "community_id": community_id,
+            "user_id": user_id,
+            "status": status,
+            "created_at": now,
+            "updated_at": now,
+        }
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO notification_receipts (
+                        id, notification_id, community_id, user_id, status, created_at, updated_at
+                    )
+                    VALUES (
+                        :id, :notification_id, :community_id, :user_id, :status, :created_at, :updated_at
+                    )
+                    ON CONFLICT(notification_id, user_id)
+                    DO UPDATE SET
+                        status = excluded.status,
+                        updated_at = excluded.updated_at
+                    """,
+                    record,
+                )
+                conn.commit()
+                row = conn.execute(
+                    """
+                    SELECT
+                        id, notification_id, community_id, user_id, status, created_at, updated_at
+                    FROM notification_receipts
+                    WHERE notification_id = ? AND user_id = ?
+                    LIMIT 1
+                    """,
+                    (notification_id, user_id),
+                ).fetchone()
+        return dict(row) if row else record
+
+    def summarize_notification_receipts(
+        self, *, community_id: str, notification_id: str
+    ) -> dict[str, Any]:
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT status, COUNT(*) as count
+                    FROM notification_receipts
+                    WHERE community_id = ? AND notification_id = ?
+                    GROUP BY status
+                    """,
+                    (community_id, notification_id),
+                ).fetchall()
+        by_status = {str(row["status"]): int(row["count"]) for row in rows}
+        return {
+            "community_id": community_id,
+            "notification_id": notification_id,
+            "by_status": by_status,
+            "total": sum(by_status.values()),
+        }
+
+    def add_audit_log(
+        self,
+        *,
+        community_id: str,
+        action: str,
+        target_type: str,
+        target_id: str | None,
+        user_id: str | None,
+        detail: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        record = {
+            "community_id": community_id,
+            "user_id": user_id,
+            "action": action,
+            "target_type": target_type,
+            "target_id": target_id,
+            "detail_json": json.dumps(detail or {}, ensure_ascii=False),
+            "created_at": utc_now(),
+        }
+        with self._lock:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO audit_logs (
+                        community_id, user_id, action, target_type, target_id, detail_json, created_at
+                    )
+                    VALUES (
+                        :community_id, :user_id, :action, :target_type, :target_id, :detail_json, :created_at
+                    )
+                    """,
+                    record,
+                )
+                conn.commit()
+                record["id"] = cursor.lastrowid
+        record["detail"] = self._safe_load_json(record.get("detail_json")) or {}
+        return record
+
+    def list_audit_logs(self, *, community_id: str, limit: int = 300) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 1000)
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT id, community_id, user_id, action, target_type, target_id, detail_json, created_at
+                    FROM audit_logs
+                    WHERE community_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (community_id, safe_limit),
+                ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["detail"] = self._safe_load_json(item.get("detail_json")) or {}
+            items.append(item)
+        items.reverse()
+        return items
+
+    def add_ops_timeline_event(
+        self,
+        *,
+        community_id: str,
+        event_type: str,
+        title: str,
+        content: str,
+        entity_type: str | None,
+        entity_id: str | None,
+        payload: dict[str, Any] | None,
+        created_by_user_id: str | None,
+    ) -> dict[str, Any]:
+        record = {
+            "id": uuid.uuid4().hex,
+            "community_id": community_id,
+            "event_type": event_type,
+            "title": title.strip(),
+            "content": content.strip(),
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "payload_json": json.dumps(payload or {}, ensure_ascii=False),
+            "created_by_user_id": created_by_user_id,
+            "created_at": utc_now(),
+        }
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO ops_timeline_events (
+                        id, community_id, event_type, title, content, entity_type,
+                        entity_id, payload_json, created_by_user_id, created_at
+                    )
+                    VALUES (
+                        :id, :community_id, :event_type, :title, :content, :entity_type,
+                        :entity_id, :payload_json, :created_by_user_id, :created_at
+                    )
+                    """,
+                    record,
+                )
+                conn.commit()
+        payload = {**record}
+        payload["payload"] = self._safe_load_json(record.get("payload_json")) or {}
+        return payload
+
+    def list_ops_timeline(self, *, community_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 800)
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        id, community_id, event_type, title, content, entity_type,
+                        entity_id, payload_json, created_by_user_id, created_at
+                    FROM ops_timeline_events
+                    WHERE community_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (community_id, safe_limit),
+                ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = self._safe_load_json(item.get("payload_json")) or {}
+            items.append(item)
+        items.reverse()
+        return items

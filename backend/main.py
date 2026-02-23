@@ -136,6 +136,144 @@ class RouteAdviceRequest(BaseModel):
     structure_notes: str = Field(default="", max_length=1000)
 
 
+class IncidentCreateRequest(BaseModel):
+    title: str = Field(..., min_length=2, max_length=120)
+    description: str = Field(default="", max_length=3000)
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lng: float | None = Field(default=None, ge=-180, le=180)
+    priority: str = Field(default="medium", pattern="^(low|medium|high|critical)$")
+    source: str = Field(default="manual", max_length=64)
+
+
+class IncidentUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=2, max_length=120)
+    description: str | None = Field(default=None, max_length=3000)
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lng: float | None = Field(default=None, ge=-180, le=180)
+    priority: str | None = Field(default=None, pattern="^(low|medium|high|critical)$")
+    status: str | None = Field(default=None, pattern="^(new|verified|responding|stabilized|closed)$")
+
+
+class IncidentTaskCreateRequest(BaseModel):
+    title: str = Field(..., min_length=2, max_length=140)
+    description: str = Field(default="", max_length=3000)
+    status: str = Field(default="new", pattern="^(new|assigned|accepted|in_progress|blocked|completed)$")
+    priority: str = Field(default="medium", pattern="^(low|medium|high|critical)$")
+    assignee_user_id: str | None = None
+    team_id: str | None = None
+    due_at: str | None = None
+
+
+class IncidentTaskUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=2, max_length=140)
+    description: str | None = Field(default=None, max_length=3000)
+    status: str | None = Field(default=None, pattern="^(new|assigned|accepted|in_progress|blocked|completed)$")
+    priority: str | None = Field(default=None, pattern="^(low|medium|high|critical)$")
+    assignee_user_id: str | None = None
+    team_id: str | None = None
+    due_at: str | None = None
+
+
+class TeamCreateRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=80)
+    specialty: str = Field(..., min_length=2, max_length=80)
+    status: str = Field(default="standby", pattern="^(standby|deployed|offline)$")
+    leader_user_id: str | None = None
+    contact: str | None = Field(default=None, max_length=120)
+    member_user_ids: list[str] = Field(default_factory=list, max_length=30)
+
+
+class TeamMemberAddRequest(BaseModel):
+    user_id: str = Field(..., min_length=6, max_length=64)
+    role: str = Field(default="member", pattern="^(leader|member|support)$")
+
+
+class DispatchCreateRequest(BaseModel):
+    incident_id: str | None = None
+    task_id: str | None = None
+    team_id: str | None = None
+    resource_type: str = Field(..., min_length=2, max_length=64)
+    resource_name: str = Field(..., min_length=2, max_length=120)
+    quantity: int = Field(default=1, ge=1, le=100000)
+    status: str = Field(default="allocated", pattern="^(allocated|in_transit|delivered|consumed|returned)$")
+    notes: str | None = Field(default=None, max_length=1200)
+
+
+class ResidentCheckinRequest(BaseModel):
+    incident_id: str | None = None
+    subject_name: str = Field(..., min_length=1, max_length=80)
+    relation: str = Field(default="self", pattern="^(self|family|neighbor|other)$")
+    status: str = Field(default="safe", pattern="^(safe|need_help|missing_proxy)$")
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lng: float | None = Field(default=None, ge=-180, le=180)
+    notes: str | None = Field(default=None, max_length=1000)
+
+
+class MissingPersonCreateRequest(BaseModel):
+    incident_id: str | None = None
+    name: str = Field(..., min_length=1, max_length=80)
+    age: int | None = Field(default=None, ge=0, le=120)
+    contact: str | None = Field(default=None, max_length=120)
+    last_seen_location: str | None = Field(default=None, max_length=200)
+    priority: str = Field(default="medium", pattern="^(low|medium|high|critical)$")
+    status: str = Field(default="open", pattern="^(open|searching|located|closed)$")
+    notes: str | None = Field(default=None, max_length=1200)
+
+
+class ShelterCreateRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=120)
+    address: str = Field(..., min_length=2, max_length=200)
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lng: float | None = Field(default=None, ge=-180, le=180)
+    capacity: int = Field(..., ge=1, le=200000)
+    current_occupancy: int = Field(default=0, ge=0, le=200000)
+    status: str = Field(default="open", pattern="^(open|limited|full|closed)$")
+
+
+class ShelterOccupancyUpdateRequest(BaseModel):
+    delta: int | None = Field(default=None, ge=-200000, le=200000)
+    absolute_occupancy: int | None = Field(default=None, ge=0, le=200000)
+    status: str | None = Field(default=None, pattern="^(open|limited|full|closed)$")
+    reason: str | None = Field(default=None, max_length=800)
+
+
+class HazardPoint(BaseModel):
+    lat: float = Field(..., ge=-90, le=90)
+    lng: float = Field(..., ge=-180, le=180)
+
+
+class HazardZoneCreateRequest(BaseModel):
+    incident_id: str | None = None
+    name: str = Field(..., min_length=2, max_length=120)
+    risk_level: str = Field(default="medium", pattern="^(low|medium|high|critical)$")
+    zone_type: str = Field(default="hazard", pattern="^(hazard|block|safe_corridor)$")
+    polygon: list[HazardPoint] = Field(..., min_length=3, max_length=100)
+    notes: str | None = Field(default=None, max_length=1200)
+    status: str = Field(default="active", pattern="^(active|resolved|archived)$")
+
+
+class RoadBlockCreateRequest(BaseModel):
+    incident_id: str | None = None
+    title: str = Field(..., min_length=2, max_length=120)
+    details: str | None = Field(default=None, max_length=1200)
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    lng: float | None = Field(default=None, ge=-180, le=180)
+    severity: str = Field(default="medium", pattern="^(low|medium|high|critical)$")
+    status: str = Field(default="active", pattern="^(active|cleared|archived)$")
+
+
+class NotificationTemplateCreateRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=80)
+    level: str = Field(default="info", pattern="^(info|warning|danger)$")
+    title_template: str = Field(..., min_length=2, max_length=120)
+    content_template: str = Field(..., min_length=2, max_length=600)
+
+
+class NotificationReceiptRequest(BaseModel):
+    notification_id: str = Field(..., min_length=6, max_length=64)
+    status: str = Field(default="read", pattern="^(read|confirmed)$")
+
+
 class ConnectionManager:
     def __init__(self) -> None:
         self.active_connections: dict[WebSocket, dict[str, str | None]] = {}
@@ -888,6 +1026,31 @@ async def create_earthquake_report_and_notify(
         },
     )
 
+    record_audit(
+        community_id=community["id"],
+        user_id=user["id"],
+        action="earthquake.report.create",
+        target_type="earthquake_report",
+        target_id=report["id"],
+        detail={
+            "felt_level": felt_level,
+            "building_type": building_type,
+            "lat": lat,
+            "lng": lng,
+        },
+    )
+    await record_ops_event(
+        community_id=community["id"],
+        event_type="earthquake_reported",
+        title=f"地震上报：{felt_level}级",
+        content=f"{building_type}，坐标 {lat:.5f}, {lng:.5f}",
+        entity_type="earthquake_report",
+        entity_id=report["id"],
+        payload={"report": report, "analysis_status": analysis.get("status", "mock")},
+        created_by_user_id=user["id"],
+        ws_type="ops_timeline_event",
+    )
+
     return {
         "status": "success",
         "report": report,
@@ -921,6 +1084,70 @@ async def create_and_broadcast_chat_message(
     }
     await manager.broadcast_to_community(community_id, payload)
     return message
+
+
+def _incident_snapshot(incident: dict[str, Any] | None) -> dict[str, Any]:
+    if not incident:
+        return {"id": None, "title": "", "status": "", "priority": ""}
+    return {
+        "id": incident.get("id"),
+        "title": incident.get("title"),
+        "status": incident.get("status"),
+        "priority": incident.get("priority"),
+    }
+
+
+async def record_ops_event(
+    *,
+    community_id: str,
+    event_type: str,
+    title: str,
+    content: str,
+    entity_type: str | None,
+    entity_id: str | None,
+    payload: dict[str, Any] | None,
+    created_by_user_id: str | None,
+    ws_type: str | None = None,
+) -> dict[str, Any]:
+    event = storage.add_ops_timeline_event(
+        community_id=community_id,
+        event_type=event_type,
+        title=title,
+        content=content,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        payload=payload,
+        created_by_user_id=created_by_user_id,
+    )
+    if ws_type:
+        await manager.broadcast_to_community(
+            community_id,
+            {
+                "type": ws_type,
+                "event": event,
+                "payload": payload or {},
+            },
+        )
+    return event
+
+
+def record_audit(
+    *,
+    community_id: str,
+    user_id: str | None,
+    action: str,
+    target_type: str,
+    target_id: str | None,
+    detail: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return storage.add_audit_log(
+        community_id=community_id,
+        user_id=user_id,
+        action=action,
+        target_type=target_type,
+        target_id=target_id,
+        detail=detail or {},
+    )
 
 
 @app.get("/")
@@ -1052,6 +1279,25 @@ async def community_alert_broadcast(
         "notification": notification,
     }
     await manager.broadcast_to_community(community["id"], payload)
+    record_audit(
+        community_id=community["id"],
+        user_id=user["id"],
+        action="community.alert.create",
+        target_type="notification",
+        target_id=notification["id"],
+        detail={"title": req.title},
+    )
+    await record_ops_event(
+        community_id=community["id"],
+        event_type="community_alert_sent",
+        title=f"社区通知：{req.title}",
+        content=req.content,
+        entity_type="notification",
+        entity_id=notification["id"],
+        payload={"notification": notification},
+        created_by_user_id=user["id"],
+        ws_type="ops_timeline_event",
+    )
     return {"status": "success", "notification": notification}
 
 
@@ -1158,6 +1404,804 @@ async def community_assistant_ask(
     }
 
 
+@app.post("/incidents")
+async def create_incident(
+    req: IncidentCreateRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    incident = storage.create_incident(
+        community_id=community["id"],
+        created_by_user_id=user["id"],
+        title=req.title,
+        description=req.description,
+        lat=req.lat,
+        lng=req.lng,
+        priority=req.priority,
+        source=req.source,
+        status="new",
+    )
+    record_audit(
+        community_id=community["id"],
+        user_id=user["id"],
+        action="incident.create",
+        target_type="incident",
+        target_id=incident["id"],
+        detail={"priority": req.priority, "source": req.source},
+    )
+    timeline_event = await record_ops_event(
+        community_id=community["id"],
+        event_type="incident_created",
+        title=f"事件已创建：{incident['title']}",
+        content=f"优先级 {incident['priority']}，状态 {incident['status']}",
+        entity_type="incident",
+        entity_id=incident["id"],
+        payload={"incident": incident},
+        created_by_user_id=user["id"],
+        ws_type="ops_timeline_event",
+    )
+    await manager.broadcast_to_community(
+        community["id"], {"type": "incident_created", "incident": incident}
+    )
+    return {"status": "success", "incident": incident, "timeline_event": timeline_event}
+
+
+@app.get("/incidents")
+async def list_incidents(
+    limit: int = Query(default=80, ge=1, le=300),
+    status: str | None = Query(default=None),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    items = storage.list_incidents(community_id=community["id"], limit=limit)
+    if status:
+        items = [item for item in items if item.get("status") == status]
+    return {"count": len(items), "items": items}
+
+
+@app.patch("/incidents/{incident_id}")
+async def patch_incident(
+    incident_id: str,
+    req: IncidentUpdateRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    incident = storage.get_incident(incident_id, community["id"])
+    if not incident:
+        raise HTTPException(status_code=404, detail="事件不存在")
+    updated = storage.update_incident(
+        incident_id=incident_id,
+        community_id=community["id"],
+        title=req.title,
+        description=req.description,
+        priority=req.priority,
+        status=req.status,
+        lat=req.lat,
+        lng=req.lng,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="事件不存在")
+    record_audit(
+        community_id=community["id"],
+        user_id=user["id"],
+        action="incident.update",
+        target_type="incident",
+        target_id=incident_id,
+        detail={"before": _incident_snapshot(incident), "after": _incident_snapshot(updated)},
+    )
+    await record_ops_event(
+        community_id=community["id"],
+        event_type="incident_updated",
+        title=f"事件已更新：{updated['title']}",
+        content=f"状态 {updated['status']}，优先级 {updated['priority']}",
+        entity_type="incident",
+        entity_id=updated["id"],
+        payload={"incident": updated},
+        created_by_user_id=user["id"],
+        ws_type="ops_timeline_event",
+    )
+    await manager.broadcast_to_community(
+        community["id"], {"type": "incident_updated", "incident": updated}
+    )
+    return {"status": "success", "incident": updated}
+
+
+@app.post("/incidents/{incident_id}/tasks")
+async def create_incident_task(
+    incident_id: str,
+    req: IncidentTaskCreateRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    incident = storage.get_incident(incident_id, community["id"])
+    if not incident:
+        raise HTTPException(status_code=404, detail="事件不存在")
+    task = storage.create_incident_task(
+        incident_id=incident_id,
+        community_id=community["id"],
+        title=req.title,
+        description=req.description,
+        status=req.status,
+        priority=req.priority,
+        assignee_user_id=req.assignee_user_id,
+        team_id=req.team_id,
+        due_at=req.due_at,
+        created_by_user_id=user["id"],
+    )
+    detailed = storage.get_task(task["id"], community["id"]) or task
+    record_audit(
+        community_id=community["id"],
+        user_id=user["id"],
+        action="task.create",
+        target_type="incident_task",
+        target_id=task["id"],
+        detail={"incident_id": incident_id, "status": req.status, "priority": req.priority},
+    )
+    await record_ops_event(
+        community_id=community["id"],
+        event_type="task_created",
+        title=f"任务已创建：{detailed.get('title', '')}",
+        content=f"事件 {incident.get('title', incident_id)}，状态 {detailed.get('status', 'new')}",
+        entity_type="task",
+        entity_id=task["id"],
+        payload={"task": detailed},
+        created_by_user_id=user["id"],
+        ws_type="ops_timeline_event",
+    )
+    await manager.broadcast_to_community(community["id"], {"type": "task_created", "task": detailed})
+    return {"status": "success", "task": detailed}
+
+
+@app.get("/incidents/{incident_id}/tasks")
+async def list_incident_tasks(
+    incident_id: str,
+    limit: int = Query(default=150, ge=1, le=500),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    items = storage.list_tasks(
+        community_id=community["id"],
+        incident_id=incident_id,
+        limit=limit,
+    )
+    return {"count": len(items), "items": items}
+
+
+@app.get("/tasks")
+async def list_tasks(
+    limit: int = Query(default=150, ge=1, le=500),
+    status: str | None = Query(default=None),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    items = storage.list_tasks(community_id=community["id"], limit=limit)
+    if status:
+        items = [item for item in items if item.get("status") == status]
+    return {"count": len(items), "items": items}
+
+
+@app.patch("/tasks/{task_id}")
+async def patch_task(
+    task_id: str,
+    req: IncidentTaskUpdateRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    before = storage.get_task(task_id, community["id"])
+    if not before:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    task = storage.update_task(
+        task_id=task_id,
+        community_id=community["id"],
+        status=req.status,
+        priority=req.priority,
+        assignee_user_id=req.assignee_user_id,
+        team_id=req.team_id,
+        due_at=req.due_at,
+        title=req.title,
+        description=req.description,
+    )
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    record_audit(
+        community_id=community["id"],
+        user_id=user["id"],
+        action="task.update",
+        target_type="incident_task",
+        target_id=task_id,
+        detail={
+            "before": {
+                "status": before.get("status"),
+                "priority": before.get("priority"),
+                "assignee_user_id": before.get("assignee_user_id"),
+                "team_id": before.get("team_id"),
+            },
+            "after": {
+                "status": task.get("status"),
+                "priority": task.get("priority"),
+                "assignee_user_id": task.get("assignee_user_id"),
+                "team_id": task.get("team_id"),
+            },
+        },
+    )
+    await record_ops_event(
+        community_id=community["id"],
+        event_type="task_updated",
+        title=f"任务已更新：{task.get('title', '')}",
+        content=f"状态 {task.get('status', '')}，优先级 {task.get('priority', '')}",
+        entity_type="task",
+        entity_id=task_id,
+        payload={"task": task},
+        created_by_user_id=user["id"],
+        ws_type="ops_timeline_event",
+    )
+    await manager.broadcast_to_community(community["id"], {"type": "task_updated", "task": task})
+    return {"status": "success", "task": task}
+
+
+@app.post("/teams")
+async def create_team(
+    req: TeamCreateRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    team = storage.create_response_team(
+        community_id=community["id"],
+        name=req.name,
+        specialty=req.specialty,
+        status=req.status,
+        leader_user_id=req.leader_user_id,
+        contact=req.contact,
+    )
+    if req.leader_user_id:
+        storage.add_team_member(team_id=team["id"], user_id=req.leader_user_id, role="leader")
+    for member_id in req.member_user_ids:
+        storage.add_team_member(team_id=team["id"], user_id=member_id, role="member")
+    record_audit(
+        community_id=community["id"],
+        user_id=user["id"],
+        action="team.create",
+        target_type="response_team",
+        target_id=team["id"],
+        detail={"specialty": team["specialty"], "status": team["status"]},
+    )
+    await record_ops_event(
+        community_id=community["id"],
+        event_type="team_created",
+        title=f"救援队已创建：{team['name']}",
+        content=f"专业类型 {team['specialty']}，状态 {team['status']}",
+        entity_type="team",
+        entity_id=team["id"],
+        payload={"team": team},
+        created_by_user_id=user["id"],
+        ws_type="ops_timeline_event",
+    )
+    return {"status": "success", "team": team}
+
+
+@app.post("/teams/{team_id}/members")
+async def add_team_member(
+    team_id: str,
+    req: TeamMemberAddRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    teams = storage.list_response_teams(community_id=community["id"], limit=300)
+    if not any(item.get("id") == team_id for item in teams):
+        raise HTTPException(status_code=404, detail="救援队不存在")
+    member = storage.add_team_member(team_id=team_id, user_id=req.user_id, role=req.role)
+    record_audit(
+        community_id=community["id"],
+        user_id=user["id"],
+        action="team.member.add",
+        target_type="response_team",
+        target_id=team_id,
+        detail={"member_user_id": req.user_id, "role": req.role},
+    )
+    await record_ops_event(
+        community_id=community["id"],
+        event_type="team_member_added",
+        title="救援队成员已加入",
+        content=f"队伍 {team_id} 新增成员 {req.user_id}",
+        entity_type="team",
+        entity_id=team_id,
+        payload={"member": member, "team_id": team_id},
+        created_by_user_id=user["id"],
+        ws_type="ops_timeline_event",
+    )
+    return {"status": "success", "member": member}
+
+
+@app.get("/teams")
+async def list_teams(
+    limit: int = Query(default=120, ge=1, le=300),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    items = storage.list_response_teams(community_id=community["id"], limit=limit)
+    return {"count": len(items), "items": items}
+
+
+@app.post("/dispatches")
+async def create_dispatch(
+    req: DispatchCreateRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    record = storage.create_dispatch_record(
+        community_id=community["id"],
+        created_by_user_id=user["id"],
+        incident_id=req.incident_id,
+        task_id=req.task_id,
+        team_id=req.team_id,
+        resource_type=req.resource_type,
+        resource_name=req.resource_name,
+        quantity=req.quantity,
+        status=req.status,
+        notes=req.notes,
+    )
+    record_audit(
+        community_id=community["id"],
+        user_id=user["id"],
+        action="dispatch.create",
+        target_type="dispatch_record",
+        target_id=record["id"],
+        detail={"resource_type": req.resource_type, "quantity": req.quantity},
+    )
+    await record_ops_event(
+        community_id=community["id"],
+        event_type="dispatch_created",
+        title=f"资源调度：{record['resource_name']}",
+        content=f"{record['resource_type']} x{record['quantity']}，状态 {record['status']}",
+        entity_type="dispatch",
+        entity_id=record["id"],
+        payload={"dispatch": record},
+        created_by_user_id=user["id"],
+        ws_type="ops_timeline_event",
+    )
+    return {"status": "success", "dispatch": record}
+
+
+@app.get("/dispatches")
+async def list_dispatches(
+    limit: int = Query(default=150, ge=1, le=400),
+    incident_id: str | None = Query(default=None),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    items = storage.list_dispatch_records(
+        community_id=community["id"], incident_id=incident_id, limit=limit
+    )
+    return {"count": len(items), "items": items}
+
+
+@app.post("/residents/checkins")
+async def create_resident_checkin(
+    req: ResidentCheckinRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    checkin = storage.add_resident_checkin(
+        community_id=community["id"],
+        user_id=user["id"] if req.relation == "self" else None,
+        incident_id=req.incident_id,
+        subject_name=req.subject_name,
+        relation=req.relation,
+        status=req.status,
+        lat=req.lat,
+        lng=req.lng,
+        notes=req.notes,
+    )
+    record_audit(
+        community_id=community["id"],
+        user_id=user["id"],
+        action="resident.checkin",
+        target_type="resident_checkin",
+        target_id=checkin["id"],
+        detail={"status": req.status, "relation": req.relation},
+    )
+    await record_ops_event(
+        community_id=community["id"],
+        event_type="resident_checkin_updated",
+        title=f"居民状态更新：{req.subject_name}",
+        content=f"状态 {req.status}（关系 {req.relation}）",
+        entity_type="resident_checkin",
+        entity_id=checkin["id"],
+        payload={"checkin": checkin},
+        created_by_user_id=user["id"],
+        ws_type="resident_checkin_updated",
+    )
+    return {"status": "success", "checkin": checkin}
+
+
+@app.get("/residents/checkins")
+async def list_resident_checkins(
+    limit: int = Query(default=150, ge=1, le=500),
+    incident_id: str | None = Query(default=None),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    items = storage.list_resident_checkins(
+        community_id=community["id"], incident_id=incident_id, limit=limit
+    )
+    return {"count": len(items), "items": items}
+
+
+@app.get("/residents/checkins/summary")
+async def resident_checkin_summary(
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    return storage.summarize_resident_checkins(community_id=community["id"])
+
+
+@app.post("/missing-persons")
+async def create_missing_person(
+    req: MissingPersonCreateRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    report = storage.create_missing_person_report(
+        community_id=community["id"],
+        incident_id=req.incident_id,
+        reporter_user_id=user["id"],
+        name=req.name,
+        age=req.age,
+        contact=req.contact,
+        last_seen_location=req.last_seen_location,
+        priority=req.priority,
+        status=req.status,
+        notes=req.notes,
+    )
+    record_audit(
+        community_id=community["id"],
+        user_id=user["id"],
+        action="missing_person.create",
+        target_type="missing_person",
+        target_id=report["id"],
+        detail={"priority": req.priority, "status": req.status},
+    )
+    await record_ops_event(
+        community_id=community["id"],
+        event_type="missing_person_reported",
+        title=f"失联人员上报：{req.name}",
+        content=f"优先级 {req.priority}，状态 {req.status}",
+        entity_type="missing_person",
+        entity_id=report["id"],
+        payload={"missing_person": report},
+        created_by_user_id=user["id"],
+        ws_type="ops_timeline_event",
+    )
+    return {"status": "success", "report": report}
+
+
+@app.get("/missing-persons")
+async def list_missing_persons(
+    limit: int = Query(default=150, ge=1, le=400),
+    status: str | None = Query(default=None),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    items = storage.list_missing_person_reports(
+        community_id=community["id"], limit=limit, status=status
+    )
+    return {"count": len(items), "items": items}
+
+
+@app.post("/shelters")
+async def create_shelter(
+    req: ShelterCreateRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    shelter = storage.create_shelter(
+        community_id=community["id"],
+        name=req.name,
+        address=req.address,
+        lat=req.lat,
+        lng=req.lng,
+        capacity=req.capacity,
+        current_occupancy=req.current_occupancy,
+        status=req.status,
+    )
+    record_audit(
+        community_id=community["id"],
+        user_id=user["id"],
+        action="shelter.create",
+        target_type="shelter",
+        target_id=shelter["id"],
+        detail={"capacity": req.capacity, "status": req.status},
+    )
+    await record_ops_event(
+        community_id=community["id"],
+        event_type="shelter_created",
+        title=f"避难点已创建：{req.name}",
+        content=f"容量 {req.capacity}，当前 {req.current_occupancy}",
+        entity_type="shelter",
+        entity_id=shelter["id"],
+        payload={"shelter": shelter},
+        created_by_user_id=user["id"],
+        ws_type="ops_timeline_event",
+    )
+    return {"status": "success", "shelter": shelter}
+
+
+@app.get("/shelters")
+async def list_shelters(
+    limit: int = Query(default=120, ge=1, le=300),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    items = storage.list_shelters(community_id=community["id"], limit=limit)
+    return {"count": len(items), "items": items}
+
+
+@app.patch("/shelters/{shelter_id}/occupancy")
+async def update_shelter_occupancy(
+    shelter_id: str,
+    req: ShelterOccupancyUpdateRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    if req.delta is None and req.absolute_occupancy is None and req.status is None:
+        raise HTTPException(status_code=400, detail="至少提供一个更新字段")
+    shelter = storage.update_shelter_occupancy(
+        shelter_id=shelter_id,
+        community_id=community["id"],
+        delta=req.delta,
+        absolute_occupancy=req.absolute_occupancy,
+        status=req.status,
+        reason=req.reason,
+        created_by_user_id=user["id"],
+    )
+    if not shelter:
+        raise HTTPException(status_code=404, detail="避难点不存在")
+    record_audit(
+        community_id=community["id"],
+        user_id=user["id"],
+        action="shelter.occupancy.update",
+        target_type="shelter",
+        target_id=shelter_id,
+        detail={
+            "delta": req.delta,
+            "absolute_occupancy": req.absolute_occupancy,
+            "status": req.status,
+        },
+    )
+    await record_ops_event(
+        community_id=community["id"],
+        event_type="shelter_occupancy_updated",
+        title=f"避难点人数更新：{shelter.get('name', shelter_id)}",
+        content=f"当前收容 {shelter.get('current_occupancy', 0)}/{shelter.get('capacity', 0)}",
+        entity_type="shelter",
+        entity_id=shelter_id,
+        payload={"shelter": shelter},
+        created_by_user_id=user["id"],
+        ws_type="ops_timeline_event",
+    )
+    return {"status": "success", "shelter": shelter}
+
+
+@app.post("/hazards/zones")
+async def create_hazard_zone(
+    req: HazardZoneCreateRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    polygon = [{"lat": point.lat, "lng": point.lng} for point in req.polygon]
+    zone = storage.create_hazard_zone(
+        community_id=community["id"],
+        incident_id=req.incident_id,
+        name=req.name,
+        risk_level=req.risk_level,
+        zone_type=req.zone_type,
+        polygon=polygon,
+        notes=req.notes,
+        status=req.status,
+        created_by_user_id=user["id"],
+    )
+    record_audit(
+        community_id=community["id"],
+        user_id=user["id"],
+        action="hazard_zone.create",
+        target_type="hazard_zone",
+        target_id=zone["id"],
+        detail={"risk_level": req.risk_level, "point_count": len(polygon)},
+    )
+    await record_ops_event(
+        community_id=community["id"],
+        event_type="hazard_zone_updated",
+        title=f"风险区已标绘：{req.name}",
+        content=f"等级 {req.risk_level}，点位 {len(polygon)} 个",
+        entity_type="hazard_zone",
+        entity_id=zone["id"],
+        payload={"hazard_zone": zone},
+        created_by_user_id=user["id"],
+        ws_type="hazard_zone_updated",
+    )
+    return {"status": "success", "hazard_zone": zone}
+
+
+@app.get("/hazards/zones")
+async def list_hazard_zones(
+    limit: int = Query(default=120, ge=1, le=300),
+    incident_id: str | None = Query(default=None),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    items = storage.list_hazard_zones(
+        community_id=community["id"], incident_id=incident_id, limit=limit
+    )
+    return {"count": len(items), "items": items}
+
+
+@app.post("/roads/blocks")
+async def create_road_block(
+    req: RoadBlockCreateRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    block = storage.create_road_block(
+        community_id=community["id"],
+        incident_id=req.incident_id,
+        title=req.title,
+        details=req.details,
+        lat=req.lat,
+        lng=req.lng,
+        severity=req.severity,
+        status=req.status,
+        created_by_user_id=user["id"],
+    )
+    record_audit(
+        community_id=community["id"],
+        user_id=user["id"],
+        action="road_block.create",
+        target_type="road_block",
+        target_id=block["id"],
+        detail={"severity": req.severity, "status": req.status},
+    )
+    await record_ops_event(
+        community_id=community["id"],
+        event_type="road_block_updated",
+        title=f"道路阻断更新：{req.title}",
+        content=f"等级 {req.severity}，状态 {req.status}",
+        entity_type="road_block",
+        entity_id=block["id"],
+        payload={"road_block": block},
+        created_by_user_id=user["id"],
+        ws_type="ops_timeline_event",
+    )
+    return {"status": "success", "road_block": block}
+
+
+@app.get("/roads/blocks")
+async def list_road_blocks(
+    limit: int = Query(default=120, ge=1, le=300),
+    incident_id: str | None = Query(default=None),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    items = storage.list_road_blocks(
+        community_id=community["id"], incident_id=incident_id, limit=limit
+    )
+    return {"count": len(items), "items": items}
+
+
+@app.post("/community/notification-templates")
+async def create_notification_template(
+    req: NotificationTemplateCreateRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    template = storage.create_notification_template(
+        community_id=community["id"],
+        name=req.name,
+        level=req.level,
+        title_template=req.title_template,
+        content_template=req.content_template,
+        created_by_user_id=user["id"],
+    )
+    record_audit(
+        community_id=community["id"],
+        user_id=user["id"],
+        action="notification_template.create",
+        target_type="notification_template",
+        target_id=template["id"],
+        detail={"level": req.level, "name": req.name},
+    )
+    await record_ops_event(
+        community_id=community["id"],
+        event_type="notification_template_created",
+        title=f"通知模板新增：{req.name}",
+        content=f"级别 {req.level}",
+        entity_type="notification_template",
+        entity_id=template["id"],
+        payload={"template": template},
+        created_by_user_id=user["id"],
+        ws_type="ops_timeline_event",
+    )
+    return {"status": "success", "template": template}
+
+
+@app.get("/community/notification-templates")
+async def list_notification_templates(
+    limit: int = Query(default=80, ge=1, le=200),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    items = storage.list_notification_templates(community_id=community["id"], limit=limit)
+    return {"count": len(items), "items": items}
+
+
+@app.post("/community/notifications/receipt")
+async def mark_notification_receipt(
+    req: NotificationReceiptRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    receipt = storage.upsert_notification_receipt(
+        notification_id=req.notification_id,
+        community_id=community["id"],
+        user_id=user["id"],
+        status=req.status,
+    )
+    summary = storage.summarize_notification_receipts(
+        community_id=community["id"],
+        notification_id=req.notification_id,
+    )
+    record_audit(
+        community_id=community["id"],
+        user_id=user["id"],
+        action="notification.receipt.upsert",
+        target_type="notification",
+        target_id=req.notification_id,
+        detail={"status": req.status},
+    )
+    await record_ops_event(
+        community_id=community["id"],
+        event_type="notification_receipt_updated",
+        title="通知回执更新",
+        content=f"通知 {req.notification_id} 新增 {req.status} 回执",
+        entity_type="notification",
+        entity_id=req.notification_id,
+        payload={"receipt": receipt, "summary": summary},
+        created_by_user_id=user["id"],
+        ws_type="ops_timeline_event",
+    )
+    return {"status": "success", "receipt": receipt, "summary": summary}
+
+
+@app.get("/community/notifications/{notification_id}/receipts/summary")
+async def notification_receipt_summary(
+    notification_id: str,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    return storage.summarize_notification_receipts(
+        community_id=community["id"], notification_id=notification_id
+    )
+
+
+@app.get("/ops/timeline")
+async def list_ops_timeline(
+    limit: int = Query(default=200, ge=1, le=800),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    items = storage.list_ops_timeline(community_id=community["id"], limit=limit)
+    return {"count": len(items), "items": items}
+
+
+@app.get("/ops/audit-logs")
+async def list_audit_logs(
+    limit: int = Query(default=200, ge=1, le=1000),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    items = storage.list_audit_logs(community_id=community["id"], limit=limit)
+    return {"count": len(items), "items": items}
+
+
 @app.post("/rescue/fire/analyze")
 async def fire_rescue_analyze(
     description: str = Form(""),
@@ -1257,6 +2301,26 @@ async def fire_rescue_analyze(
             "community_id": community["id"],
             "notification": notification,
         },
+    )
+
+    record_audit(
+        community_id=community["id"],
+        user_id=user["id"],
+        action="fire_rescue_analysis.create",
+        target_type="fire_rescue_analysis",
+        target_id=record["id"],
+        detail={"victim_count": victim_count, "analysis_status": ai_resp.get("status", "degraded")},
+    )
+    await record_ops_event(
+        community_id=community["id"],
+        event_type="fire_rescue_analysis_updated",
+        title="火灾救援分析已更新",
+        content=f"识别疑似受困人员 {victim_count} 人，状态 {record['status']}",
+        entity_type="fire_rescue_analysis",
+        entity_id=record["id"],
+        payload={"analysis": record, "notification": notification},
+        created_by_user_id=user["id"],
+        ws_type="ops_timeline_event",
     )
 
     return {
@@ -1664,6 +2728,86 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     item.pop("image_urls_json", None)
                     item.pop("analysis_json", None)
                 await websocket.send_json({"type": "fire_rescue_analyses", "items": items})
+            elif ptype == "fetch_incidents":
+                if not user or not user.get("community"):
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "source": "SYSTEM",
+                            "content": "请先登录后再查看事件列表。",
+                        }
+                    )
+                    continue
+                limit = int(payload.get("limit", 80))
+                items = storage.list_incidents(
+                    community_id=user["community"]["id"],
+                    limit=max(1, min(limit, 300)),
+                )
+                await websocket.send_json({"type": "incidents", "items": items})
+            elif ptype == "fetch_tasks":
+                if not user or not user.get("community"):
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "source": "SYSTEM",
+                            "content": "请先登录后再查看任务列表。",
+                        }
+                    )
+                    continue
+                limit = int(payload.get("limit", 150))
+                incident_id = payload.get("incident_id")
+                items = storage.list_tasks(
+                    community_id=user["community"]["id"],
+                    incident_id=str(incident_id) if incident_id else None,
+                    limit=max(1, min(limit, 500)),
+                )
+                await websocket.send_json({"type": "tasks", "items": items})
+            elif ptype == "fetch_teams":
+                if not user or not user.get("community"):
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "source": "SYSTEM",
+                            "content": "请先登录后再查看救援队。",
+                        }
+                    )
+                    continue
+                limit = int(payload.get("limit", 120))
+                items = storage.list_response_teams(
+                    community_id=user["community"]["id"],
+                    limit=max(1, min(limit, 300)),
+                )
+                await websocket.send_json({"type": "teams", "items": items})
+            elif ptype == "fetch_ops_timeline":
+                if not user or not user.get("community"):
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "source": "SYSTEM",
+                            "content": "请先登录后再查看时间轴。",
+                        }
+                    )
+                    continue
+                limit = int(payload.get("limit", 200))
+                items = storage.list_ops_timeline(
+                    community_id=user["community"]["id"],
+                    limit=max(1, min(limit, 800)),
+                )
+                await websocket.send_json({"type": "ops_timeline", "items": items})
+            elif ptype == "fetch_resident_checkin_summary":
+                if not user or not user.get("community"):
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "source": "SYSTEM",
+                            "content": "请先登录后再查看居民回执统计。",
+                        }
+                    )
+                    continue
+                summary = storage.summarize_resident_checkins(
+                    community_id=user["community"]["id"]
+                )
+                await websocket.send_json({"type": "resident_checkin_summary", "summary": summary})
             else:
                 await websocket.send_json(
                     {
