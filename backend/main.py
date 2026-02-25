@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import io
 import json
 import os
 import re
@@ -24,6 +25,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
+from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
 
 try:
@@ -34,6 +36,8 @@ except Exception:
 try:
     from backend.agents.manager import MissionManager
     from backend.config import settings
+    from backend.services.dispatch_agent import DispatchAgentPlanner
+    from backend.services.earthquake_vlm_rescue import EarthquakeVLMRescueAnalyzer
     from backend.services.storage import Storage
     from backend.utils.auth import (
         create_access_token,
@@ -42,10 +46,11 @@ try:
         verify_password,
     )
     from backend.utils.rag_engine import retrieve_policy
-    from backend.utils.yolo_detector import YoloPersonDetector
 except ImportError:
     from agents.manager import MissionManager
     from config import settings
+    from services.dispatch_agent import DispatchAgentPlanner
+    from services.earthquake_vlm_rescue import EarthquakeVLMRescueAnalyzer
     from services.storage import Storage
     from utils.auth import (
         create_access_token,
@@ -54,7 +59,6 @@ except ImportError:
         verify_password,
     )
     from utils.rag_engine import retrieve_policy
-    from utils.yolo_detector import YoloPersonDetector
 
 app = FastAPI(title=settings.app_name, version=settings.app_version)
 app.add_middleware(
@@ -71,7 +75,8 @@ app.mount("/uploads", StaticFiles(directory=str(settings.upload_dir)), name="upl
 storage = Storage(settings.database_path)
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "8")) * 1024 * 1024
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_\u4e00-\u9fff]{2,32}$")
-MAX_FIRE_IMAGES = int(os.getenv("MAX_FIRE_IMAGES", "6"))
+MAX_RESCUE_IMAGES = int(os.getenv("MAX_RESCUE_IMAGES", os.getenv("MAX_FIRE_IMAGES", "6")))
+UNSUPPORTED_AERIAL_IMAGE_TYPES = {"image/heic", "image/heif"}
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -85,7 +90,7 @@ class RegisterRequest(BaseModel):
     display_name: str = Field(..., min_length=1, max_length=64)
     password: str = Field(..., min_length=6, max_length=128)
     community_name: str = Field(..., min_length=2, max_length=80)
-    community_district: str = Field(default="成都市", max_length=80)
+    community_district: str = Field(default="默认行政区", max_length=80)
 
 
 class LoginRequest(BaseModel):
@@ -330,13 +335,18 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
-fire_person_detector = YoloPersonDetector(
-    model_path=settings.yolo_model_path,
-    model_url=settings.yolo_model_url,
-    input_size=settings.yolo_input_size,
-    confidence_threshold=settings.yolo_confidence_threshold,
-    iou_threshold=settings.yolo_iou_threshold,
-    max_detections=settings.yolo_max_detections,
+earthquake_rescue_analyzer = EarthquakeVLMRescueAnalyzer(
+    api_key=settings.openai_api_key,
+    model=settings.openai_vlm_model or settings.openai_model,
+    base_url=settings.openai_base_url,
+    upload_dir=settings.upload_dir,
+    max_images=MAX_RESCUE_IMAGES,
+)
+dispatch_agent_planner = DispatchAgentPlanner(
+    api_key=settings.openai_api_key,
+    model=settings.openai_model,
+    base_url=settings.openai_base_url,
+    max_tasks=6,
 )
 
 
@@ -547,303 +557,292 @@ def run_community_assistant(
         return {"status": "degraded", "answer": fallback, "error": str(exc)}
 
 
-def heuristic_fire_rescue_analysis(
+def _pick_value(value: str, allowed: set[str], fallback: str) -> str:
+    candidate = (value or "").strip().lower()
+    if candidate in allowed:
+        return candidate
+    return fallback
+
+
+async def execute_dispatch_agent_for_analysis(
     *,
-    description: str,
-    lat: float | None,
-    lng: float | None,
-    warning: str | None = None,
+    community: dict[str, Any],
+    user: dict[str, Any],
+    analysis_record: dict[str, Any],
+    trigger_source: str,
 ) -> dict[str, Any]:
-    coord = f"{lat:.5f}, {lng:.5f}" if lat is not None and lng is not None else "未知坐标"
-    return {
-        "scene_overview": f"火灾现场初步评估完成（{coord}），当前未形成稳定视觉识别结果，建议按网格分区搜救。",
-        "victims": [],
-        "routes": [
-            {
-                "name": "R1-网格搜救主线",
-                "steps": [
-                    "以主入口为起点，按左-中-右三列网格推进",
-                    "优先排查楼梯间、疏散通道和烟雾聚集区",
-                    "每 3 分钟更新一次搜救网格状态",
-                ],
-                "risk": "现场目标位置不明确，存在漏检风险",
-                "recommended_team": "搜救组A + 通信引导组",
-            },
-            {
-                "name": "R2-外围复核线",
-                "steps": [
-                    "沿建筑外围建立安全观察点",
-                    "对窗台、阳台和临边区域进行二次确认",
-                    "与主线共享图像与坐标更新",
-                ],
-                "risk": "外立面坠落物与局部高温",
-                "recommended_team": "搜救组B + 安全警戒组",
-            },
-        ],
-        "command_notes": [
-            "本次结果为 YOLO 视觉流程的降级方案（未使用 VLM）。",
-            "优先断电断气并控制围观人员，防止二次事故。",
-            f"现场描述参考：{description or '无'}",
-            *([f"降级原因：{warning}"] if warning else []),
-        ],
-    }
+    idempotency_key = f"{analysis_record['id']}:v1"
+    existing = storage.get_dispatch_agent_run_by_key(idempotency_key=idempotency_key)
+    if existing:
+        return existing
 
+    incidents = storage.list_incidents(community_id=community["id"], limit=200)
+    tasks = storage.list_tasks(community_id=community["id"], limit=300)
+    teams = storage.list_response_teams(community_id=community["id"], limit=200)
+    dispatches = storage.list_dispatch_records(community_id=community["id"], limit=200)
+    analysis_payload = analysis_record.get("analysis") if isinstance(analysis_record, dict) else {}
+    if not isinstance(analysis_payload, dict):
+        analysis_payload = {}
 
-def _victim_risk_level(score: float) -> str:
-    if score >= 0.62:
-        return "高"
-    if score >= 0.45:
-        return "中"
-    return "低"
-
-
-def _build_fire_routes(victims: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if not victims:
-        return [
-            {
-                "name": "R1-无目标网格巡检",
-                "steps": [
-                    "按网格方式推进，优先覆盖烟雾高密度区域",
-                    "重点排查通道、楼梯间和拐角盲区",
-                    "持续回传航拍画面，等待下一轮自动识别",
-                ],
-                "risk": "视觉暂未发现明确目标，可能存在遮挡漏检",
-                "recommended_team": "搜救组A + 航拍侦查组",
-            }
-        ]
-
-    primary_targets = victims[: min(3, len(victims))]
-    secondary_targets = victims[min(3, len(victims)) : min(6, len(victims))]
-    target_hint = "、".join(item.get("position_hint", "未知点位") for item in primary_targets)
-    routes = [
-        {
-            "name": "R1-高优先级突入线",
-            "steps": [
-                "从上风向入口突入并设置引导绳",
-                f"优先接近目标：{target_hint}",
-                "完成转运后回传目标状态并重新分配小队",
-            ],
-            "risk": "高温烟层和可见度下降影响推进效率",
-            "recommended_team": "搜救组A + 医疗转运组",
-        }
-    ]
-
-    if secondary_targets:
-        secondary_hint = "、".join(item.get("position_hint", "未知点位") for item in secondary_targets)
-        routes.append(
-            {
-                "name": "R2-侧翼补盲线",
-                "steps": [
-                    "由北/西侧安全通道推进建立缓冲点",
-                    f"同步复核次级目标：{secondary_hint}",
-                    "与主线保持双向通信并准备接应撤离",
-                ],
-                "risk": "局部结构稳定性与碎片坠落风险",
-                "recommended_team": "搜救组B + 结构评估组",
-            }
-        )
-    else:
-        routes.append(
-            {
-                "name": "R2-外围封控线",
-                "steps": [
-                    "清理外侧通道并建立警戒圈",
-                    "为后续救援转运开辟备用通道",
-                    "保持对主线的热区监测和烟气观测",
-                ],
-                "risk": "外围火点复燃和人员回流风险",
-                "recommended_team": "警戒组 + 后勤保障组",
-            }
-        )
-    return routes
-
-
-def _analysis_from_yolo_detections(
-    *,
-    description: str,
-    lat: float | None,
-    lng: float | None,
-    image_results: list[dict[str, Any]],
-    detection_errors: list[str],
-) -> dict[str, Any]:
-    candidates: list[dict[str, Any]] = []
-    for image_idx, image_result in enumerate(image_results, 1):
-        image_name = image_result.get("name") or f"image-{image_idx}"
-        image_url = image_result.get("url")
-        for det in image_result.get("detections", []):
-            confidence = float(det.get("confidence", 0.0))
-            area_ratio = float(det.get("area_ratio", 0.0))
-            risk_score = min(0.99, confidence * 0.72 + min(area_ratio * 4.5, 0.28))
-            candidates.append(
-                {
-                    "image_name": image_name,
-                    "image_url": image_url,
-                    "confidence": confidence,
-                    "bbox_xyxy": det.get("bbox_xyxy", []),
-                    "position_hint": det.get("position_hint", "画面未知区域"),
-                    "center_x": float(det.get("center_x", 0.5)),
-                    "center_y": float(det.get("center_y", 0.5)),
-                    "area_ratio": area_ratio,
-                    "risk_score": risk_score,
-                }
-            )
-
-    candidates.sort(
-        key=lambda item: (
-            float(item.get("risk_score", 0.0)),
-            float(item.get("confidence", 0.0)),
-            float(item.get("area_ratio", 0.0)),
-        ),
-        reverse=True,
+    plan_result = dispatch_agent_planner.generate_plan(
+        analysis=analysis_payload,
+        incidents=incidents,
+        tasks=tasks,
+        teams=teams,
+        dispatches=dispatches,
+    )
+    plan_payload = plan_result.get("plan") if isinstance(plan_result.get("plan"), dict) else {}
+    run = storage.create_dispatch_agent_run(
+        community_id=community["id"],
+        analysis_id=analysis_record["id"],
+        trigger_source=trigger_source,
+        idempotency_key=idempotency_key,
+        input_payload={
+            "incidents": len(incidents),
+            "tasks": len(tasks),
+            "teams": len(teams),
+            "dispatches": len(dispatches),
+            "analysis_overview": analysis_payload.get("scene_overview"),
+            "victim_count": len(analysis_payload.get("victims", []))
+            if isinstance(analysis_payload.get("victims"), list)
+            else 0,
+        },
+        plan_payload={
+            **plan_payload,
+            "source": plan_result.get("source"),
+            "planner_status": plan_result.get("status"),
+            "planner_error": plan_result.get("error"),
+        },
+        status="running",
+        error=None,
     )
 
-    victims: list[dict[str, Any]] = []
-    for index, item in enumerate(candidates[:30], 1):
-        risk_level = _victim_risk_level(float(item.get("risk_score", 0.0)))
-        bbox = item.get("bbox_xyxy") or []
-        victims.append(
-            {
-                "id": f"V-{index}",
-                "position_hint": f"{item.get('image_name', '现场图')} · {item.get('position_hint', '未知区域')}",
-                "priority": index,
-                "evidence": (
-                    f"YOLO(person)置信度 {float(item.get('confidence', 0.0)):.2f}，"
-                    f"边框 {bbox if bbox else '未知'}"
-                ),
-                "image_name": item.get("image_name"),
-                "image_url": item.get("image_url"),
-                "bbox_xyxy": bbox,
-                "confidence": round(float(item.get("confidence", 0.0)), 4),
-                "center": {
-                    "x": round(float(item.get("center_x", 0.5)), 4),
-                    "y": round(float(item.get("center_y", 0.5)), 4),
-                },
-                "area_ratio": round(float(item.get("area_ratio", 0.0)), 6),
-                "risk_level": risk_level,
-            },
-        )
+    created_incident_ids: list[str] = []
+    updated_incident_ids: list[str] = []
+    created_task_ids: list[str] = []
+    updated_task_ids: list[str] = []
+    created_dispatch_ids: list[str] = []
+    execution_errors: list[str] = []
 
-    detection_count = len(candidates)
-    image_count = len(image_results)
-    hit_images = sum(1 for item in image_results if item.get("detections"))
-    coord = f"{lat:.5f}, {lng:.5f}" if lat is not None and lng is not None else "未知坐标"
+    active_incident = next((row for row in incidents if row.get("status") != "closed"), None)
+    incident_for_tasks = active_incident["id"] if active_incident else None
+    task_lookup = {row["id"]: row for row in tasks if row.get("id")}
+    team_lookup = {row["id"]: row for row in teams if row.get("id")}
 
-    if detection_count:
-        scene_overview = (
-            f"YOLO 鸟瞰图检测完成（{coord}），共分析 {image_count} 张图，"
-            f"发现疑似受困人员 {detection_count} 人次，涉及 {hit_images} 张图像。"
-        )
-    else:
-        scene_overview = (
-            f"YOLO 鸟瞰图检测完成（{coord}），共分析 {image_count} 张图，"
-            "当前未识别到明确受困人员目标，建议继续补充多角度航拍。"
-        )
-
-    routes = _build_fire_routes(victims)
-    notes = [
-        "本次结果由原生 YOLO 人员检测生成，未调用 VLM。",
-        "请救援小队对高优先级目标执行目视复核后再突入。",
-        "建议 2-3 分钟更新一次鸟瞰图并复跑检测。",
-        f"现场描述参考：{description or '无'}",
-    ]
-    if detection_errors:
-        notes.append(f"部分图片检测异常：{'; '.join(detection_errors[:3])}")
-
-    detection_summary = [
-        {
-            "image_name": item.get("name", f"image-{idx + 1}"),
-            "image_url": item.get("url"),
-            "detected_people": len(item.get("detections", [])),
-        }
-        for idx, item in enumerate(image_results)
-    ]
-
-    return {
-        "scene_overview": scene_overview,
-        "victims": victims,
-        "routes": routes,
-        "command_notes": notes,
-        "detection_summary": detection_summary,
-    }
-
-
-def run_fire_rescue_analysis(
-    *,
-    description: str,
-    lat: float | None,
-    lng: float | None,
-    images: list[dict[str, Any]],
-) -> dict[str, Any]:
-    fallback = heuristic_fire_rescue_analysis(description=description, lat=lat, lng=lng)
-    if not images:
-        return {
-            "status": "degraded",
-            "analysis": fallback,
-            "error": "未提供可分析的鸟瞰图",
-        }
-    if not fire_person_detector.available:
-        return {
-            "status": "degraded",
-            "analysis": heuristic_fire_rescue_analysis(
-                description=description,
-                lat=lat,
-                lng=lng,
-                warning="onnxruntime 不可用，YOLO 推理未执行",
-            ),
-            "error": "onnxruntime 未安装，无法运行 YOLO",
-        }
-
-    image_results: list[dict[str, Any]] = []
-    detection_errors: list[str] = []
-    try:
-        for idx, image in enumerate(images[:MAX_FIRE_IMAGES], 1):
-            name = str(image.get("name") or f"image-{idx}")
-            url = image.get("url")
-            raw = image.get("bytes")
-            if not isinstance(raw, (bytes, bytearray)) or not raw:
-                detection_errors.append(f"{name} 缺少有效图片字节")
+    incident_actions = plan_payload.get("incident_actions")
+    if isinstance(incident_actions, list):
+        for action in incident_actions[:2]:
+            if not isinstance(action, dict):
                 continue
-            try:
-                detected = fire_person_detector.detect_people(bytes(raw))
-                image_results.append(
-                    {
-                        "name": name,
-                        "url": url,
-                        "width": detected.get("width"),
-                        "height": detected.get("height"),
-                        "detections": detected.get("detections", []),
-                    }
+            mode = str(action.get("action") or "create").lower()
+            if mode == "update" and action.get("incident_id"):
+                target_id = str(action.get("incident_id"))
+                before = storage.get_incident(target_id, community["id"])
+                if not before:
+                    execution_errors.append(f"incident.update:{target_id}:not_found")
+                    continue
+                updated = storage.update_incident(
+                    incident_id=target_id,
+                    community_id=community["id"],
+                    title=str(action.get("title") or before.get("title") or "地震事件"),
+                    description=str(action.get("description") or before.get("description") or ""),
+                    priority=_pick_value(
+                        str(action.get("priority") or before.get("priority") or "high"),
+                        {"low", "medium", "high", "critical"},
+                        "high",
+                    ),
+                    status=_pick_value(
+                        str(action.get("status") or before.get("status") or "responding"),
+                        {"new", "verified", "responding", "stabilized", "closed"},
+                        "responding",
+                    ),
                 )
-            except Exception as image_exc:
-                detection_errors.append(f"{name}: {image_exc}")
-                image_results.append({"name": name, "url": url, "detections": []})
-    except Exception as exc:
-        return {"status": "degraded", "analysis": fallback, "error": str(exc)}
+                if updated:
+                    updated_incident_ids.append(updated["id"])
+                    incident_for_tasks = updated["id"]
+                continue
 
-    if not image_results:
-        return {
-            "status": "degraded",
-            "analysis": heuristic_fire_rescue_analysis(
-                description=description,
-                lat=lat,
-                lng=lng,
-                warning="全部图片均未成功进入 YOLO 推理",
-            ),
-            "error": "; ".join(detection_errors) if detection_errors else "未生成有效图片分析结果",
-        }
+            created = storage.create_incident(
+                community_id=community["id"],
+                created_by_user_id=user["id"],
+                title=str(action.get("title") or "地震受灾搜救事件"),
+                description=str(action.get("description") or analysis_payload.get("scene_overview") or ""),
+                lat=analysis_record.get("lat"),
+                lng=analysis_record.get("lng"),
+                priority=_pick_value(
+                    str(action.get("priority") or "high"),
+                    {"low", "medium", "high", "critical"},
+                    "high",
+                ),
+                source="agent_auto",
+                status=_pick_value(
+                    str(action.get("status") or "responding"),
+                    {"new", "verified", "responding", "stabilized", "closed"},
+                    "responding",
+                ),
+            )
+            created_incident_ids.append(created["id"])
+            incident_for_tasks = created["id"]
 
-    analysis = _analysis_from_yolo_detections(
-        description=description,
-        lat=lat,
-        lng=lng,
-        image_results=image_results,
-        detection_errors=detection_errors,
+    if not incident_for_tasks:
+        auto_incident = storage.create_incident(
+            community_id=community["id"],
+            created_by_user_id=user["id"],
+            title="地震受灾搜救事件",
+            description=str(analysis_payload.get("scene_overview") or "自动调度创建事件"),
+            lat=analysis_record.get("lat"),
+            lng=analysis_record.get("lng"),
+            priority="high",
+            source="agent_auto",
+            status="responding",
+        )
+        created_incident_ids.append(auto_incident["id"])
+        incident_for_tasks = auto_incident["id"]
+
+    task_actions = plan_payload.get("task_actions")
+    if isinstance(task_actions, list):
+        for action in task_actions[:6]:
+            if not isinstance(action, dict):
+                continue
+            mode = str(action.get("action") or "create").lower()
+            if mode == "update" and action.get("task_id"):
+                task_id = str(action.get("task_id"))
+                before = task_lookup.get(task_id)
+                if not before:
+                    execution_errors.append(f"task.update:{task_id}:not_found")
+                    continue
+                if str(before.get("status")) == "completed":
+                    continue
+                updated = storage.update_task(
+                    task_id=task_id,
+                    community_id=community["id"],
+                    status=_pick_value(
+                        str(action.get("status") or before.get("status") or "in_progress"),
+                        {"new", "assigned", "accepted", "in_progress", "blocked", "completed"},
+                        "in_progress",
+                    ),
+                    priority=_pick_value(
+                        str(action.get("priority") or before.get("priority") or "high"),
+                        {"low", "medium", "high", "critical"},
+                        "high",
+                    ),
+                    assignee_user_id=str(action.get("assignee_user_id") or "").strip() or None,
+                    team_id=str(action.get("team_id") or "").strip() or None,
+                    due_at=None,
+                    title=str(action.get("title") or before.get("title") or "AI自动任务"),
+                    description=str(action.get("description") or before.get("description") or ""),
+                )
+                if updated:
+                    updated_task_ids.append(updated["id"])
+                    task_lookup[updated["id"]] = updated
+                continue
+
+            team_id = str(action.get("team_id") or "").strip() or None
+            if team_id and team_id not in team_lookup:
+                team_id = None
+            description = str(action.get("description") or "").strip()
+            if not description:
+                description = "AI-AUTO：依据地震图像识别结果执行现场搜救。"
+            if "[AI-AUTO]" not in description:
+                description = f"[AI-AUTO] {description}"
+            created_task = storage.create_incident_task(
+                incident_id=incident_for_tasks,
+                community_id=community["id"],
+                title=str(action.get("title") or "AI自动搜救任务")[:140],
+                description=description[:3000],
+                status=_pick_value(
+                    str(action.get("status") or "assigned"),
+                    {"new", "assigned", "accepted", "in_progress", "blocked", "completed"},
+                    "assigned",
+                ),
+                priority=_pick_value(
+                    str(action.get("priority") or "high"),
+                    {"low", "medium", "high", "critical"},
+                    "high",
+                ),
+                assignee_user_id=str(action.get("assignee_user_id") or "").strip() or None,
+                team_id=team_id,
+                due_at=None,
+                created_by_user_id=user["id"],
+            )
+            created_task_ids.append(created_task["id"])
+            detailed = storage.get_task(created_task["id"], community["id"]) or created_task
+            task_lookup[detailed["id"]] = detailed
+
+    dispatch_actions = plan_payload.get("dispatch_actions")
+    if isinstance(dispatch_actions, list):
+        for idx, action in enumerate(dispatch_actions[:6], 1):
+            if not isinstance(action, dict):
+                continue
+            team_id = str(action.get("team_id") or "").strip() or None
+            if team_id and team_id not in team_lookup:
+                team_id = None
+            linked_task_id = created_task_ids[idx - 1] if idx - 1 < len(created_task_ids) else None
+            dispatch_record = storage.create_dispatch_record(
+                community_id=community["id"],
+                created_by_user_id=user["id"],
+                incident_id=incident_for_tasks,
+                task_id=linked_task_id,
+                team_id=team_id,
+                resource_type=str(action.get("resource_type") or "rescue_unit")[:64],
+                resource_name=str(action.get("resource_name") or "机动搜救单元")[:120],
+                quantity=max(1, int(action.get("quantity") or 1)),
+                status=_pick_value(
+                    str(action.get("status") or "allocated"),
+                    {"allocated", "in_transit", "delivered", "consumed", "returned"},
+                    "allocated",
+                ),
+                notes=str(action.get("notes") or "AI-AUTO 调度记录")[:1200],
+            )
+            created_dispatch_ids.append(dispatch_record["id"])
+
+    execution_payload = {
+        "incident": {"created": created_incident_ids, "updated": updated_incident_ids},
+        "tasks": {"created": created_task_ids, "updated": updated_task_ids},
+        "dispatches": {"created": created_dispatch_ids},
+        "planner_status": plan_result.get("status"),
+        "planner_source": plan_result.get("source"),
+        "planner_error": plan_result.get("error"),
+        "execution_errors": execution_errors,
+    }
+    final_status = "completed" if not execution_errors else "degraded"
+    updated_run = storage.update_dispatch_agent_run_result(
+        run_id=run["id"],
+        status=final_status,
+        execution_payload=execution_payload,
+        error="; ".join(execution_errors) if execution_errors else None,
     )
-    status = "ok" if not detection_errors else "degraded"
-    payload: dict[str, Any] = {"status": status, "analysis": analysis}
-    if detection_errors:
-        payload["error"] = "; ".join(detection_errors)
-    return payload
+    result = updated_run or run
+
+    record_audit(
+        community_id=community["id"],
+        user_id=user["id"],
+        action="dispatch_agent.execute",
+        target_type="dispatch_agent_run",
+        target_id=result.get("id"),
+        detail={
+            "analysis_id": analysis_record.get("id"),
+            "status": result.get("status"),
+            "created_incident_count": len(created_incident_ids),
+            "created_task_count": len(created_task_ids),
+            "created_dispatch_count": len(created_dispatch_ids),
+        },
+    )
+    await record_ops_event(
+        community_id=community["id"],
+        event_type="dispatch_agent_executed",
+        title="自动调度 Agent 已执行",
+        content=(
+            f"事件+{len(created_incident_ids)}，任务+{len(created_task_ids)}，"
+            f"调度+{len(created_dispatch_ids)}，状态 {result.get('status')}"
+        ),
+        entity_type="dispatch_agent_run",
+        entity_id=result.get("id"),
+        payload={"dispatch_agent_run": result},
+        created_by_user_id=user["id"],
+        ws_type="dispatch_agent_executed",
+    )
+    return result
 
 
 def sanitize_username(username: str) -> str:
@@ -1200,7 +1199,7 @@ async def auth_register(req: RegisterRequest) -> dict[str, Any]:
 
     community = storage.create_or_get_community(
         name=req.community_name.strip(),
-        district=req.community_district.strip() or "成都市",
+        district=req.community_district.strip() or settings.base_city,
         base_lat=settings.base_lat,
         base_lng=settings.base_lng,
     )
@@ -2202,93 +2201,135 @@ async def list_audit_logs(
     return {"count": len(items), "items": items}
 
 
-@app.post("/rescue/fire/analyze")
-async def fire_rescue_analyze(
-    description: str = Form(""),
-    lat: float | None = Form(default=None),
-    lng: float | None = Form(default=None),
-    images: list[UploadFile] | None = File(default=None),
-    user: dict[str, Any] = Depends(get_current_user),
+async def _perform_earthquake_rescue_analysis(
+    *,
+    description: str,
+    lat: float | None,
+    lng: float | None,
+    images: list[UploadFile] | None,
+    user: dict[str, Any],
+    trigger_source: str,
+    deprecated_endpoint: bool,
 ) -> dict[str, Any]:
     community = user["community"]
     image_files = images or []
     if not image_files:
-        raise HTTPException(status_code=400, detail="请至少上传 1 张鸟瞰图")
-    if len(image_files) > MAX_FIRE_IMAGES:
-        raise HTTPException(status_code=400, detail=f"最多上传 {MAX_FIRE_IMAGES} 张现场图片")
-
+        raise HTTPException(status_code=400, detail="请至少上传 1 张地震现场图")
+    if len(image_files) > MAX_RESCUE_IMAGES:
+        raise HTTPException(status_code=400, detail=f"最多上传 {MAX_RESCUE_IMAGES} 张现场图片")
     if lat is not None and not (-90 <= lat <= 90):
         raise HTTPException(status_code=400, detail="lat 越界")
     if lng is not None and not (-180 <= lng <= 180):
         raise HTTPException(status_code=400, detail="lng 越界")
 
-    image_dir = settings.upload_dir / "fire_images"
+    image_dir = settings.upload_dir / "earthquake_images"
     image_dir.mkdir(parents=True, exist_ok=True)
     image_urls: list[str] = []
     image_payloads: list[dict[str, Any]] = []
     for image in image_files:
         if not image.content_type or not image.content_type.startswith("image/"):
             raise HTTPException(status_code=400, detail="上传文件中包含非图片类型")
+        if image.content_type.lower() in UNSUPPORTED_AERIAL_IMAGE_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail="暂不支持 HEIC/HEIF，请先转换为 JPG/PNG 后再上传",
+            )
         raw = await image.read()
         if len(raw) > MAX_UPLOAD_BYTES:
             raise HTTPException(
                 status_code=413,
                 detail=f"图片过大，单张限制 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB",
             )
+        try:
+            with Image.open(io.BytesIO(raw)) as verified:
+                verified.verify()
+        except UnidentifiedImageError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"无法识别图片格式：{image.filename or '未命名文件'}，请使用 JPG/PNG/WebP",
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"图片校验失败：{image.filename or '未命名文件'}",
+            ) from exc
+
         ext = Path(image.filename or "").suffix.lower() or ".jpg"
         fname = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex}{ext}"
         fpath = image_dir / fname
         fpath.write_bytes(raw)
-        url = f"/uploads/fire_images/{fname}"
+        url = f"/uploads/earthquake_images/{fname}"
         image_urls.append(url)
         image_payloads.append(
             {"name": image.filename or fname, "bytes": raw, "mime": image.content_type, "url": url}
         )
 
-    ai_resp = run_fire_rescue_analysis(
+    ai_resp = earthquake_rescue_analyzer.analyze(
+        community_id=community["id"],
         description=description.strip(),
         lat=lat,
         lng=lng,
         images=image_payloads,
     )
-    analysis = ai_resp.get("analysis") or {}
-    victims = analysis.get("victims") if isinstance(analysis, dict) else []
-    victim_count = len(victims) if isinstance(victims, list) else 0
+    analysis = ai_resp.get("analysis") if isinstance(ai_resp.get("analysis"), dict) else {}
+    victims = analysis.get("victims") if isinstance(analysis.get("victims"), list) else []
+    victim_count = len(victims)
 
-    record = storage.add_fire_rescue_analysis(
+    record = storage.add_earthquake_rescue_analysis(
         community_id=community["id"],
         requester_user_id=user["id"],
         description=description.strip(),
         lat=lat,
         lng=lng,
-        scene_model_name=None,
-        scene_model_url=None,
         image_urls=image_urls,
-        analysis=analysis if isinstance(analysis, dict) else {},
+        analysis=analysis,
         status=str(ai_resp.get("status", "degraded")),
     )
     record.pop("image_urls_json", None)
     record.pop("analysis_json", None)
 
+    dispatch_run = await execute_dispatch_agent_for_analysis(
+        community=community,
+        user=user,
+        analysis_record=record,
+        trigger_source=trigger_source,
+    )
+
     notice_content = (
-        f"[{community['name']}] 鸟瞰图 YOLO 救援分析已更新：识别疑似受困人员 {victim_count} 人。"
-        "请救援小组按推荐路线执行并持续回传鸟瞰图。"
+        f"[{community['name']}] 地震受灾搜救分析已更新：识别疑似受灾人员 {victim_count} 人。"
+        "自动调度 Agent 已同步生成搜救任务，请救援小组按路线执行。"
     )
     notification = storage.create_notification(
         community_id=community["id"],
         sender_user_id=user["id"],
-        title="火灾救援分析更新",
+        title="地震受灾搜救分析更新",
         content=notice_content,
-        payload={"analysis_id": record["id"], "victim_count": victim_count},
+        payload={
+            "analysis_id": record["id"],
+            "victim_count": victim_count,
+            "dispatch_agent_run_id": dispatch_run.get("id"),
+        },
     )
     notification.pop("payload_json", None)
 
+    ws_payload = {
+        "analysis": record,
+        "notification": notification,
+        "dispatch_agent_run": dispatch_run,
+        "deprecated_endpoint": deprecated_endpoint,
+    }
+    await manager.broadcast_to_community(
+        community["id"],
+        {
+            "type": "earthquake_rescue_analysis",
+            **ws_payload,
+        },
+    )
     await manager.broadcast_to_community(
         community["id"],
         {
             "type": "fire_rescue_analysis",
-            "analysis": record,
-            "notification": notification,
+            **ws_payload,
         },
     )
     await manager.broadcast_to_community(
@@ -2296,7 +2337,7 @@ async def fire_rescue_analyze(
         {
             "type": "community_alert",
             "source": "COMMUNITY_ALERT",
-            "title": "火灾救援分析更新",
+            "title": "地震受灾搜救分析更新",
             "content": notice_content,
             "community_id": community["id"],
             "notification": notification,
@@ -2306,19 +2347,28 @@ async def fire_rescue_analyze(
     record_audit(
         community_id=community["id"],
         user_id=user["id"],
-        action="fire_rescue_analysis.create",
-        target_type="fire_rescue_analysis",
+        action="earthquake_rescue_analysis.create",
+        target_type="earthquake_rescue_analysis",
         target_id=record["id"],
-        detail={"victim_count": victim_count, "analysis_status": ai_resp.get("status", "degraded")},
+        detail={
+            "victim_count": victim_count,
+            "analysis_status": ai_resp.get("status", "degraded"),
+            "deprecated_endpoint": deprecated_endpoint,
+        },
     )
     await record_ops_event(
         community_id=community["id"],
-        event_type="fire_rescue_analysis_updated",
-        title="火灾救援分析已更新",
-        content=f"识别疑似受困人员 {victim_count} 人，状态 {record['status']}",
-        entity_type="fire_rescue_analysis",
+        event_type="earthquake_rescue_analysis_updated",
+        title="地震受灾搜救分析已更新",
+        content=f"识别疑似受灾人员 {victim_count} 人，状态 {record['status']}",
+        entity_type="earthquake_rescue_analysis",
         entity_id=record["id"],
-        payload={"analysis": record, "notification": notification},
+        payload={
+            "analysis": record,
+            "notification": notification,
+            "dispatch_agent_run": dispatch_run,
+            "deprecated_endpoint": deprecated_endpoint,
+        },
         created_by_user_id=user["id"],
         ws_type="ops_timeline_event",
     )
@@ -2329,19 +2379,86 @@ async def fire_rescue_analyze(
         "analysis_error": ai_resp.get("error"),
         "result": record,
         "notification": notification,
+        "dispatch_agent_run": dispatch_run,
+        "deprecated_endpoint": deprecated_endpoint,
     }
 
 
-@app.get("/rescue/fire/analyses")
-async def list_fire_rescue_analyses(
+@app.post("/rescue/earthquake/analyze")
+async def earthquake_rescue_analyze(
+    description: str = Form(""),
+    lat: float | None = Form(default=None),
+    lng: float | None = Form(default=None),
+    images: list[UploadFile] | None = File(default=None),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    return await _perform_earthquake_rescue_analysis(
+        description=description,
+        lat=lat,
+        lng=lng,
+        images=images,
+        user=user,
+        trigger_source="earthquake_rescue_endpoint",
+        deprecated_endpoint=False,
+    )
+
+
+@app.post("/rescue/fire/analyze")
+async def fire_rescue_analyze_legacy(
+    description: str = Form(""),
+    lat: float | None = Form(default=None),
+    lng: float | None = Form(default=None),
+    images: list[UploadFile] | None = File(default=None),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    payload = await _perform_earthquake_rescue_analysis(
+        description=description,
+        lat=lat,
+        lng=lng,
+        images=images,
+        user=user,
+        trigger_source="legacy_fire_proxy",
+        deprecated_endpoint=True,
+    )
+    payload["deprecation_note"] = "请迁移至 /rescue/earthquake/analyze"
+    return payload
+
+
+@app.get("/rescue/earthquake/analyses")
+async def list_earthquake_rescue_analyses(
     limit: int = Query(default=20, ge=1, le=200),
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     community = user["community"]
-    items = storage.list_fire_rescue_analyses(community_id=community["id"], limit=limit)
+    items = storage.list_earthquake_rescue_analyses(community_id=community["id"], limit=limit)
     for item in items:
         item.pop("image_urls_json", None)
         item.pop("analysis_json", None)
+    return {"count": len(items), "items": items}
+
+
+@app.get("/rescue/fire/analyses")
+async def list_fire_rescue_analyses_legacy(
+    limit: int = Query(default=20, ge=1, le=200),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    payload = await list_earthquake_rescue_analyses(limit=limit, user=user)
+    payload["deprecated_endpoint"] = True
+    payload["deprecation_note"] = "请迁移至 /rescue/earthquake/analyses"
+    return payload
+
+
+@app.get("/dispatch-agent/runs")
+async def list_dispatch_agent_runs(
+    limit: int = Query(default=20, ge=1, le=200),
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    items = storage.list_dispatch_agent_runs(community_id=community["id"], limit=limit)
+    for item in items:
+        item.pop("input_json", None)
+        item.pop("plan_json", None)
+        item.pop("execution_json", None)
     return {"count": len(items), "items": items}
 
 
@@ -2709,18 +2826,18 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                             "error": ai_resp.get("error"),
                         },
                     )
-            elif ptype == "fetch_fire_rescue_analyses":
+            elif ptype in {"fetch_fire_rescue_analyses", "fetch_earthquake_rescue_analyses"}:
                 if not user or not user.get("community"):
                     await websocket.send_json(
                         {
                             "type": "error",
                             "source": "SYSTEM",
-                            "content": "请先登录后再查看火灾救援分析。",
+                            "content": "请先登录后再查看地震搜救分析。",
                         }
                     )
                     continue
                 limit = int(payload.get("limit", 20))
-                items = storage.list_fire_rescue_analyses(
+                items = storage.list_earthquake_rescue_analyses(
                     community_id=user["community"]["id"],
                     limit=max(1, min(limit, 200)),
                 )
@@ -2728,6 +2845,27 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     item.pop("image_urls_json", None)
                     item.pop("analysis_json", None)
                 await websocket.send_json({"type": "fire_rescue_analyses", "items": items})
+                await websocket.send_json({"type": "earthquake_rescue_analyses", "items": items})
+            elif ptype == "fetch_dispatch_agent_runs":
+                if not user or not user.get("community"):
+                    await websocket.send_json(
+                        {
+                            "type": "error",
+                            "source": "SYSTEM",
+                            "content": "请先登录后再查看自动调度记录。",
+                        }
+                    )
+                    continue
+                limit = int(payload.get("limit", 20))
+                items = storage.list_dispatch_agent_runs(
+                    community_id=user["community"]["id"],
+                    limit=max(1, min(limit, 200)),
+                )
+                for item in items:
+                    item.pop("input_json", None)
+                    item.pop("plan_json", None)
+                    item.pop("execution_json", None)
+                await websocket.send_json({"type": "dispatch_agent_runs", "items": items})
             elif ptype == "fetch_incidents":
                 if not user or not user.get("community"):
                     await websocket.send_json(

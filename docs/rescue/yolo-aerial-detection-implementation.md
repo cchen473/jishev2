@@ -1,4 +1,8 @@
-# 鸟瞰图 YOLO 受灾群众检测实现细节
+# 鸟瞰图 YOLO 受灾群众检测实现细节（Deprecated）
+
+> 状态：已废弃（2026-02-24 起不再作为主链路）  
+> 当前主链路已切换为地震场景 VLM 分析，请优先阅读  
+> `/Users/cc/jishev2/nebulaguard/docs/rescue/vlm-earthquake-rescue-implementation.md`
 
 ## 1. 文档范围
 

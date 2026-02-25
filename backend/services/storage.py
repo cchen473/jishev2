@@ -146,6 +146,21 @@ class Storage:
                         FOREIGN KEY(requester_user_id) REFERENCES users(id)
                     );
 
+                    CREATE TABLE IF NOT EXISTS earthquake_rescue_analyses (
+                        id TEXT PRIMARY KEY,
+                        community_id TEXT NOT NULL,
+                        requester_user_id TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        lat REAL,
+                        lng REAL,
+                        image_urls_json TEXT,
+                        analysis_json TEXT,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY(community_id) REFERENCES communities(id),
+                        FOREIGN KEY(requester_user_id) REFERENCES users(id)
+                    );
+
                     CREATE INDEX IF NOT EXISTS idx_membership_user
                     ON community_memberships(user_id);
 
@@ -163,6 +178,9 @@ class Storage:
 
                     CREATE INDEX IF NOT EXISTS idx_fire_rescue_community_created
                     ON fire_rescue_analyses(community_id, created_at);
+
+                    CREATE INDEX IF NOT EXISTS idx_eq_rescue_community_created
+                    ON earthquake_rescue_analyses(community_id, created_at);
 
                     CREATE TABLE IF NOT EXISTS incidents (
                         id TEXT PRIMARY KEY,
@@ -406,6 +424,21 @@ class Storage:
                         FOREIGN KEY(created_by_user_id) REFERENCES users(id)
                     );
 
+                    CREATE TABLE IF NOT EXISTS dispatch_agent_runs (
+                        id TEXT PRIMARY KEY,
+                        community_id TEXT NOT NULL,
+                        analysis_id TEXT NOT NULL,
+                        trigger_source TEXT NOT NULL,
+                        idempotency_key TEXT NOT NULL UNIQUE,
+                        input_json TEXT,
+                        plan_json TEXT,
+                        execution_json TEXT,
+                        status TEXT NOT NULL,
+                        error TEXT,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY(community_id) REFERENCES communities(id)
+                    );
+
                     CREATE INDEX IF NOT EXISTS idx_incidents_community_created
                     ON incidents(community_id, created_at);
 
@@ -450,6 +483,12 @@ class Storage:
 
                     CREATE INDEX IF NOT EXISTS idx_timeline_community_created
                     ON ops_timeline_events(community_id, created_at);
+
+                    CREATE INDEX IF NOT EXISTS idx_dispatch_agent_runs_community_created
+                    ON dispatch_agent_runs(community_id, created_at);
+
+                    CREATE INDEX IF NOT EXISTS idx_dispatch_agent_runs_analysis
+                    ON dispatch_agent_runs(analysis_id, created_at);
                     """
                 )
                 conn.commit()
@@ -898,6 +937,78 @@ class Storage:
                         id, community_id, requester_user_id, description, lat, lng,
                         scene_model_name, scene_model_url, image_urls_json, analysis_json, status, created_at
                     FROM fire_rescue_analyses
+                    WHERE community_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (community_id, safe_limit),
+                ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["image_urls"] = self._safe_load_json(item.get("image_urls_json")) or []
+            item["analysis"] = self._safe_load_json(item.get("analysis_json")) or {}
+            items.append(item)
+        items.reverse()
+        return items
+
+    def add_earthquake_rescue_analysis(
+        self,
+        *,
+        community_id: str,
+        requester_user_id: str,
+        description: str,
+        lat: float | None,
+        lng: float | None,
+        image_urls: list[str] | None,
+        analysis: dict[str, Any],
+        status: str,
+    ) -> dict[str, Any]:
+        record = {
+            "id": uuid.uuid4().hex,
+            "community_id": community_id,
+            "requester_user_id": requester_user_id,
+            "description": description.strip(),
+            "lat": lat,
+            "lng": lng,
+            "image_urls_json": json.dumps(image_urls or [], ensure_ascii=False),
+            "analysis_json": json.dumps(analysis or {}, ensure_ascii=False),
+            "status": status,
+            "created_at": utc_now(),
+        }
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO earthquake_rescue_analyses (
+                        id, community_id, requester_user_id, description, lat, lng,
+                        image_urls_json, analysis_json, status, created_at
+                    )
+                    VALUES (
+                        :id, :community_id, :requester_user_id, :description, :lat, :lng,
+                        :image_urls_json, :analysis_json, :status, :created_at
+                    )
+                    """,
+                    record,
+                )
+                conn.commit()
+        payload = {**record}
+        payload["image_urls"] = self._safe_load_json(record.get("image_urls_json")) or []
+        payload["analysis"] = self._safe_load_json(record.get("analysis_json")) or {}
+        return payload
+
+    def list_earthquake_rescue_analyses(
+        self, *, community_id: str, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 200)
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        id, community_id, requester_user_id, description, lat, lng,
+                        image_urls_json, analysis_json, status, created_at
+                    FROM earthquake_rescue_analyses
                     WHERE community_id = ?
                     ORDER BY created_at DESC
                     LIMIT ?
@@ -2387,6 +2498,149 @@ class Storage:
         for row in rows:
             item = dict(row)
             item["payload"] = self._safe_load_json(item.get("payload_json")) or {}
+            items.append(item)
+        items.reverse()
+        return items
+
+    def get_dispatch_agent_run_by_key(
+        self, *, idempotency_key: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """
+                    SELECT
+                        id, community_id, analysis_id, trigger_source, idempotency_key,
+                        input_json, plan_json, execution_json, status, error, created_at
+                    FROM dispatch_agent_runs
+                    WHERE idempotency_key = ?
+                    LIMIT 1
+                    """,
+                    (idempotency_key,),
+                ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["input"] = self._safe_load_json(item.get("input_json")) or {}
+        item["plan"] = self._safe_load_json(item.get("plan_json")) or {}
+        item["execution"] = self._safe_load_json(item.get("execution_json")) or {}
+        return item
+
+    def create_dispatch_agent_run(
+        self,
+        *,
+        community_id: str,
+        analysis_id: str,
+        trigger_source: str,
+        idempotency_key: str,
+        input_payload: dict[str, Any],
+        plan_payload: dict[str, Any],
+        status: str,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        record = {
+            "id": uuid.uuid4().hex,
+            "community_id": community_id,
+            "analysis_id": analysis_id,
+            "trigger_source": trigger_source,
+            "idempotency_key": idempotency_key,
+            "input_json": json.dumps(input_payload or {}, ensure_ascii=False),
+            "plan_json": json.dumps(plan_payload or {}, ensure_ascii=False),
+            "execution_json": json.dumps({}, ensure_ascii=False),
+            "status": status,
+            "error": error,
+            "created_at": utc_now(),
+        }
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO dispatch_agent_runs (
+                        id, community_id, analysis_id, trigger_source, idempotency_key,
+                        input_json, plan_json, execution_json, status, error, created_at
+                    )
+                    VALUES (
+                        :id, :community_id, :analysis_id, :trigger_source, :idempotency_key,
+                        :input_json, :plan_json, :execution_json, :status, :error, :created_at
+                    )
+                    """,
+                    record,
+                )
+                conn.commit()
+        payload = {**record}
+        payload["input"] = self._safe_load_json(record.get("input_json")) or {}
+        payload["plan"] = self._safe_load_json(record.get("plan_json")) or {}
+        payload["execution"] = self._safe_load_json(record.get("execution_json")) or {}
+        return payload
+
+    def update_dispatch_agent_run_result(
+        self,
+        *,
+        run_id: str,
+        status: str,
+        execution_payload: dict[str, Any],
+        error: str | None = None,
+    ) -> dict[str, Any] | None:
+        payload = {
+            "run_id": run_id,
+            "status": status,
+            "execution_json": json.dumps(execution_payload or {}, ensure_ascii=False),
+            "error": error,
+        }
+        with self._lock:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE dispatch_agent_runs
+                    SET status = :status, execution_json = :execution_json, error = :error
+                    WHERE id = :run_id
+                    """,
+                    payload,
+                )
+                conn.commit()
+                row = conn.execute(
+                    """
+                    SELECT
+                        id, community_id, analysis_id, trigger_source, idempotency_key,
+                        input_json, plan_json, execution_json, status, error, created_at
+                    FROM dispatch_agent_runs
+                    WHERE id = ?
+                    LIMIT 1
+                    """,
+                    (run_id,),
+                ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["input"] = self._safe_load_json(item.get("input_json")) or {}
+        item["plan"] = self._safe_load_json(item.get("plan_json")) or {}
+        item["execution"] = self._safe_load_json(item.get("execution_json")) or {}
+        return item
+
+    def list_dispatch_agent_runs(
+        self, *, community_id: str, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        safe_limit = min(max(limit, 1), 200)
+        with self._lock:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT
+                        id, community_id, analysis_id, trigger_source, idempotency_key,
+                        input_json, plan_json, execution_json, status, error, created_at
+                    FROM dispatch_agent_runs
+                    WHERE community_id = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (community_id, safe_limit),
+                ).fetchall()
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["input"] = self._safe_load_json(item.get("input_json")) or {}
+            item["plan"] = self._safe_load_json(item.get("plan_json")) or {}
+            item["execution"] = self._safe_load_json(item.get("execution_json")) or {}
             items.append(item)
         items.reverse()
         return items

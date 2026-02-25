@@ -1,20 +1,23 @@
 # NebulaGuard Earthquake Command System
 
-面向成都社区场景的地震指挥系统（Web 管理端 + Flutter 原生用户端 + 实时协同后端）。
+面向社区场景的地震指挥系统（Web 管理端 + Flutter 原生用户端 + 实时协同后端）。
 
 ## 当前能力
 
-- 地震单灾种指挥：系统默认基准城市为成都（`30.5728, 104.0668`）。
+- 地震单灾种指挥：支持按社区基准坐标配置地图中心与工作区。
 - 社区化协同：用户注册/登录后自动创建或加入社区群组。
 - 社区 AI 管理助手：支持群聊中自动回复与单独提问。
 - 社区聊天：社区成员可在群聊实时交流，消息通过 WebSocket 同步。
 - 震情上报：支持上报震感等级、建筑/房屋结构、现场描述和可选图片。
 - VLM 避险建议：可选调用 OpenAI 视觉模型分析现场图片和结构风险，失败自动降级规则建议。
 - 社区通知：上报后自动生成避险通知广播到同社区用户，支持手动发送通知。
-- 火灾救援分析：上传鸟瞰图，基于原生 YOLO 人员检测识别受灾群众并生成救援路线建议（不依赖 VLM）。
+- 地震受灾搜救分析：上传鸟瞰图后调用 VLM，识别疑似受灾群众、生成搜索/救援路线，并返回标注图。
+- 算法增强：对受灾目标计算优先分，输出复杂度指数、覆盖率与热点聚类。
+- 自动调度 Agent：地震搜救分析完成后自动生成事件、任务和调度记录，并写入审计与时间轴。
 - 事件闭环增强：支持事件中心、工单流转、救援队编组、资源调度、居民报平安、避难点容量、风险区标绘、道路阻断、通知回执、审计与复盘时间轴。
 - 实时链路：WebSocket 推送任务过程、震情上报和社区通知。
-- 数据持久化：SQLite 存储用户、社区、上报、通知、群聊、火灾救援分析、任务和任务事件。
+- 数据持久化：SQLite 存储用户、社区、上报、通知、群聊、地震搜救分析、自动调度执行记录与闭环任务数据。
+- 管理端导航：左侧分为总览/调度/社区三工作区，避免单页堆叠。
 
 ## 项目结构
 
@@ -24,8 +27,11 @@
 - `backend/data/policies/protocols.md` 应急策略文档
 - `docs/功能文档.md` 功能说明文档
 - `docs/mobile/flutter-testing-guide.md` Flutter 编译与真机测试手册
-- `docs/rescue/yolo-aerial-detection-implementation.md` YOLO 鸟瞰检测实现细节
+- `docs/rescue/vlm-earthquake-rescue-implementation.md` 地震 VLM 搜救实现细节
+- `docs/rescue/yolo-aerial-detection-implementation.md` YOLO 旧方案（Deprecated）
+- `docs/interaction/web-interaction-guide.md` 管理端交互说明
 - `docs/spec/current-progress.spec.md` 项目进度 Spec
+- `docs/spec/next-phase-expansion.plan.md` 后续功能扩展评审稿
 - `AGENT.md` 项目治理规范
 
 ## 快速启动
@@ -53,7 +59,7 @@ npm run dev
 默认访问（管理端）：
 
 - 指挥中心: `http://localhost:3000`
-- 移动端迁移说明页: `http://localhost:3000/mobile`
+- 移动端 Web 上报页: `http://localhost:3000/mobile`
 
 ### 3) Flutter 原生用户端
 
@@ -88,10 +94,13 @@ flutter run --dart-define=API_BASE_URL=http://127.0.0.1:8000
 - `POST /report/earthquake_with_media` 地震上报（带图片）
 - `POST /ai/route_advice` 文本避险建议
 
-### 火灾救援
+### 地震搜救分析（VLM）
 
-- `POST /rescue/fire/analyze` 上传鸟瞰图，执行 YOLO 受困人员检测并生成救援路线
-- `GET /rescue/fire/analyses` 查看社区内最近火灾救援分析
+- `POST /rescue/earthquake/analyze` 上传鸟瞰图并执行地震受灾搜救分析
+- `GET /rescue/earthquake/analyses` 查看社区最近地震搜救分析
+- `GET /dispatch-agent/runs` 查看自动调度 Agent 执行记录
+- `POST /rescue/fire/analyze`（兼容，Deprecated）代理到地震分析接口
+- `GET /rescue/fire/analyses`（兼容，Deprecated）读取同源分析结果
 
 ### 应急闭环
 
@@ -115,21 +124,21 @@ flutter run --dart-define=API_BASE_URL=http://127.0.0.1:8000
 
 关键变量见 `backend/.env.example`：
 
-- `BASE_CITY`、`BASE_LAT`、`BASE_LNG`：城市基准（默认成都）
+- `BASE_CITY`、`BASE_LAT`、`BASE_LNG`：城市基准（可按部署环境配置）
 - `OPENAI_API_KEY`、`OPENAI_MODEL`、`OPENAI_VLM_MODEL`
-- `YOLO_MODEL_PATH`、`YOLO_MODEL_URL`、`YOLO_CONFIDENCE_THRESHOLD`
+- `MAX_RESCUE_IMAGES`、`MAX_UPLOAD_MB`
 - `AUTH_SECRET`、`AUTH_TOKEN_EXP_MINUTES`
-- `DATABASE_PATH`、`UPLOAD_DIR`、`MAX_UPLOAD_MB`
+- `DATABASE_PATH`、`UPLOAD_DIR`
 
 ## 数据库说明
 
 后端默认使用 SQLite（`backend/data/nebulaguard.db`），并已包含以下核心表结构与索引：
 
 - 用户与社区：`users`、`communities`、`community_memberships`
-- 业务数据：`earthquake_reports`、`community_notifications`、`community_chat_messages`、`fire_rescue_analyses`
+- 业务数据：`earthquake_reports`、`community_notifications`、`community_chat_messages`、`earthquake_rescue_analyses`、`dispatch_agent_runs`
 - 闭环增强：`incidents`、`incident_tasks`、`response_teams`、`dispatch_records`、`resident_checkins`、`missing_person_reports`、`shelters`、`shelter_occupancy_events`、`hazard_zones`、`road_blocks`、`notification_receipts`、`audit_logs`、`ops_timeline_events`
 - 指挥任务：`missions`、`mission_events`
-- 性能索引：已为社区聊天、通知、上报、火灾分析按 `community_id + created_at` 建立索引
+- 性能索引：已为社区聊天、通知、上报、搜救分析、调度记录按 `community_id + created_at` 建立索引
 
 ## 备注
 

@@ -54,7 +54,9 @@ class ApiClient {
     if (detail is String && detail.trim().isNotEmpty) {
       throw ApiException(detail);
     }
-    if (detail is List && detail.isNotEmpty && detail.first is Map<String, dynamic>) {
+    if (detail is List &&
+        detail.isNotEmpty &&
+        detail.first is Map<String, dynamic>) {
       final msg = (detail.first['msg'] ?? '').toString();
       if (msg.isNotEmpty) {
         throw ApiException(msg);
@@ -63,7 +65,8 @@ class ApiClient {
     throw ApiException('请求失败：HTTP ${resp.statusCode}');
   }
 
-  Future<AuthPayload> login({required String username, required String password}) async {
+  Future<AuthPayload> login(
+      {required String username, required String password}) async {
     final resp = await http.post(
       _uri('/auth/login'),
       headers: _headers(),
@@ -71,6 +74,16 @@ class ApiClient {
     );
     final data = await _decode(resp);
     return AuthPayload.fromJson(data);
+  }
+
+  Future<void> pingHealth() async {
+    final resp = await http.get(
+      _uri('/health'),
+      headers: _headers(jsonBody: false),
+    );
+    if (resp.statusCode < 200 || resp.statusCode >= 300) {
+      throw ApiException('健康检查失败：HTTP ${resp.statusCode}');
+    }
   }
 
   Future<AuthPayload> register({
@@ -96,9 +109,11 @@ class ApiClient {
   }
 
   Future<AuthUser> fetchMe() async {
-    final resp = await http.get(_uri('/auth/me'), headers: _headers(jsonBody: false));
+    final resp =
+        await http.get(_uri('/auth/me'), headers: _headers(jsonBody: false));
     final data = await _decode(resp);
-    return AuthUser.fromJson((data['user'] ?? <String, dynamic>{}) as Map<String, dynamic>);
+    return AuthUser.fromJson(
+        (data['user'] ?? <String, dynamic>{}) as Map<String, dynamic>);
   }
 
   Future<List<ChatMessage>> fetchChatMessages({int limit = 100}) async {
@@ -115,7 +130,8 @@ class ApiClient {
         .toList();
   }
 
-  Future<void> sendChatMessage({required String content, bool askAi = false}) async {
+  Future<void> sendChatMessage(
+      {required String content, bool askAi = false}) async {
     final resp = await http.post(
       _uri('/community/chat/send'),
       headers: _headers(),
@@ -181,7 +197,8 @@ class ApiClient {
         'notes': notes,
         if (lat != null) 'lat': lat,
         if (lng != null) 'lng': lng,
-        if (incidentId != null && incidentId.isNotEmpty) 'incident_id': incidentId,
+        if (incidentId != null && incidentId.isNotEmpty)
+          'incident_id': incidentId,
       }),
     );
     await _decode(resp);

@@ -1,141 +1,144 @@
-# NebulaGuard 当前进度 Spec（2026-02-23）
+# NebulaGuard 当前进度 Spec（2026-02-24）
 
 ## 1. 目标与范围
 
-本 Spec 对齐一期目标：
+当前阶段目标：
 
-1. 文档补齐（移动端测试 + YOLO实现说明 + 项目治理）。
-2. 在现有系统基础上扩展为“应急闭环增强”能力。
-3. 保持现有 API 兼容，新增能力通过新接口提供。
+1. 将救援链路从 YOLO/火灾语义迁移为**地震 + VLM**主链路。
+2. 建立“分析 -> 自动调度 -> 事件工单 -> 时间轴”闭环。
+3. 保持旧 `/rescue/fire/*` 接口短期兼容，不破坏已有调用。
+4. 优化主站体验（多工作区分屏、聊天独立滚动、地图放大、自动调度可视化）。
 
 ---
 
 ## 2. 当前总体状态
 
 - 后端健康：`/health` 返回 `ok`。
-- 前端状态：`npm run lint --prefix frontend` / `npm run build --prefix frontend` 可通过。
-- 数据层：SQLite 已承载认证、社区、聊天、通知、地震上报、YOLO 分析。
-- 移动端：Flutter 社区端已具备运行源码，需执行 `flutter create .` 生成平台目录。
+- 前端状态：`npm run lint` / `npm run build`（frontend）可通过。
+- 救援主链路：已切换为 `POST /rescue/earthquake/analyze`。
+- 自动调度：分析完成后自动执行，结果入库并广播。
+- 数据层：SQLite 已新增 `earthquake_rescue_analyses`、`dispatch_agent_runs`。
+- 交互文档：已补充管理端交互指南，支持新手按步骤走完整闭环。
 
 ---
 
 ## 3. 已完成（Done）
 
-## 3.1 核心业务（既有）
+### 3.1 地震 VLM 救援主链路
 
-- 用户注册/登录与社区绑定。
-- 地震上报与社区通知广播。
-- 社区群聊与 AI 助手问答。
-- 火灾鸟瞰图 YOLO 检测与救援建议。
+- 新增服务：`backend/services/earthquake_vlm_rescue.py`。
+- 输入多图后进行 VLM 结构化识别。
+- 支持受灾目标 `bbox_norm` 归一化校验与纠偏。
+- 支持后端标注图生成并返回 `annotated_image_url`。
+- 聚合输出：`scene_overview / victims / routes / command_notes / image_findings`。
+- 新增算法层：`priority_score`、热点聚类、复杂度指数、覆盖率评估。
 
-## 3.2 新增闭环能力（本次）
+### 3.2 兼容发布策略
 
-- 事件中心：`incidents`（创建/查询/更新）。
-- 任务工单：`incident_tasks`（创建/查询/流转）。
-- 救援队伍：`response_teams` + `team_memberships`。
-- 资源调度：`dispatch_records`。
-- 居民回执：`resident_checkins` + 统计接口。
-- 失联人员：`missing_person_reports`。
-- 避难点容量：`shelters` + `shelter_occupancy_events`。
-- 风险区标绘：`hazard_zones`。
-- 道路阻断：`road_blocks`。
-- 通知模板：`community_notification_templates`。
-- 通知回执：`notification_receipts`。
-- 审计日志与复盘：`audit_logs` + `ops_timeline_events`。
+- 新增接口：
+  - `POST /rescue/earthquake/analyze`
+  - `GET /rescue/earthquake/analyses`
+- 旧接口保留代理（deprecated）：
+  - `POST /rescue/fire/analyze`
+  - `GET /rescue/fire/analyses`
+- WS 新增：`earthquake_rescue_analysis`，并保留兼容 `fire_rescue_analysis`。
 
-## 3.3 前端管理端（本次）
+### 3.3 自动调度 Agent（全自动）
 
-- 新增事件中心组件 `IncidentBoard`。
-- 新增工单看板组件 `TaskKanban`。
-- 新增复盘时间轴 `TimelineRail`。
-- 新增通知回执面板 `ReadReceiptPanel`。
+- 新增服务：`backend/services/dispatch_agent.py`。
+- 分析完成后自动触发调度执行器。
+- 幂等键：`analysis_id + version`。
+- 自动落地：incident / task / dispatch。
+- 全量写入：`dispatch_agent_runs`、`audit_logs`、`ops_timeline_events`。
+- WS 新增：`dispatch_agent_executed`。
 
-## 3.4 Flutter 用户端（本次）
+### 3.4 管理端 UI 升级（主站 `/`）
 
-- 底部导航扩展为 5 Tab：上报、群聊、AI助手、报平安、社区。
-- 群聊增强：快捷短语 chips + 更清晰消息卡片。
-- 新增报平安页：支持状态上报和社区摘要。
-- 新增社区页：事件/避难点可视化列表。
+- 左侧 rail 改为可交互工作区：总览 / 调度 / 社区（多页分区体验）。
+- 右侧新增悬停抽屉工作台：`指挥终端 / 社区群聊 / 地震搜救` 从右侧滑出，可固定展开。
+- 聊天区域改为独立滚动窗口，输入区固定，整页恢复自然滚动。
+- 地图默认缩放提升至近景（社区中心可配置）。
+- 救援面板语义迁移为“地震受灾搜救分析”。
+- 任务看板重构为 4 状态分栏（待接单/已接单/处理中/已完成），支持按优先级排序和快速推进状态。
+- Agent 面板改为纯数据轨迹显示（状态/产出/错误/时间），移除说明型文案。
+- 恢复移动端 Web 上报入口（含图片上传与避险建议返回），与 Flutter 客户端并行可用。
+
+### 3.5 文档补齐（本轮）
+
+- 新增交互文档：`docs/interaction/web-interaction-guide.md`
+- 更新功能文档：`docs/功能文档.md`（含项目实用价值说明）
+- 更新治理规范：`AGENT.md`
 
 ---
 
 ## 4. 进行中（In Progress）
 
-1. Flutter 真机联调（依赖本机 Flutter/Xcode/Android SDK 环境）。
-2. 管理端与移动端的实时链路统一（移动端当前聊天仍是轮询）。
-3. 通知回执在管理端的统计可视化（已具备接口，图形化待加强）。
+1. Flutter 端对新救援语义与自动调度结果的展示对齐。
+2. 自动调度策略分级（全自动 / 审批后执行）开关设计。
+3. README 中历史文案持续去旧语义（fire/YOLO）收尾。
 
 ---
 
 ## 5. 待做（Todo）
 
-1. 将 Flutter 聊天从轮询改为 WebSocket 推送。
-2. 任务调度规则引擎（自动派单、超时升级、冲突检测）。
-3. 风险区/道路阻断地图交互编辑（拖拽点、撤销重做）。
-4. 失联人员地图追踪与批量指派。
-5. 复盘导出（PDF/Markdown）与演练评分。
-6. 数据库从 SQLite 平滑迁移 PostgreSQL（生产化）。
+1. 自动调度回滚工具（按 run_id 撤销本次自动创建项）。
+2. 调度约束可配置化（每社区任务上限、队伍白名单）。
+3. 调度冲突检测（同队伍多任务并发冲突）。
+4. 地图叠加危险区与路线阻断联动展示。
+5. 事件复盘导出（Markdown/PDF）。
+6. Agent 执行轨迹支持按 incident_id 过滤与反查。
 
 ---
 
-## 6. 技术债与缺口
+## 6. 技术债与风险
 
-1. 数据库 migration 体系缺失（当前为启动时建表）。
-2. 缺少统一 RBAC 权限模型（现阶段社区级权限为主）。
-3. 缺少后端自动化测试（pytest）覆盖。
-4. Flutter 端无集成测试脚本（`integration_test` 需补齐）。
-5. 大量业务事件暂未做幂等键控制。
-
----
-
-## 7. 风险清单
-
-1. 模型/推理风险：YOLO CPU 推理在多图场景可能延迟较高。
-2. 规模风险：SQLite 在高并发下吞吐受限。
-3. 运维风险：真机联调依赖局域网与本地防火墙配置。
-4. 安全风险：当前审计可用，但细粒度权限仍需强化。
+1. 仍为 SQLite，社区并发上升后需要 PostgreSQL 迁移。
+2. VLM 输出受模型稳定性影响，需要持续完善 schema 校验。
+3. 自动执行为高风险操作，需加强审批与风控阈值。
+4. 多图串行推理时延偏高，后续应改并发与缓存。
 
 ---
 
-## 8. 里程碑
+## 7. 里程碑
 
-## M1（已完成）
+### M2（已完成）
 
-- 单灾种（地震）指挥闭环可跑通。
-- 社区聊天 + AI 助手 + YOLO 分析上线。
+- 地震 VLM 分析与标注图主链路上线。
+- 自动调度 Agent 执行与审计链路上线。
+- Web 主站核心体验改造完成。
 
-## M2（已完成）
+### M3（下一阶段）
 
-- 事件-任务-调度-回执-复盘的数据结构与 API 落地。
-- 管理端新增事件板、工单看板、时间轴与回执面板。
+- 调度审批开关 + 回滚能力。
+- Flutter 端完整接入实时调度结果。
+- 地图风险区/阻断信息联动。
 
-## M3（目标）
+### M4（中期）
 
-- Flutter WebSocket 实时化。
-- 路线阻断与风险区地图编辑器上线。
-- 自动派单策略上线。
-
-## M4（目标）
-
-- PostgreSQL 迁移。
-- 权限模型与审计合规加强。
-- 压测与发布基线建立。
+- PostgreSQL 迁移与性能基线。
+- 权限细粒度化（RBAC + 操作级授权）。
 
 ---
 
-## 9. 验收标准（一期）
+## 8. 验收标准（当前阶段）
 
-1. 新增接口可正常 CRUD 并可在 WebSocket 观察到关键事件。
-2. 管理端可创建事件、创建任务、推进任务状态、查看时间轴。
-3. 用户端可提交报平安并在管理端统计看到变化。
-4. 文档可指导新手完成 Flutter 模拟器+真机测试。
-5. lint/build/py_compile 全通过，不破坏既有功能。
+1. 新接口可稳定输出地震 VLM 识别结果与标注图 URL。
+2. 分析后自动生成事件/任务/调度并可在 UI 看见。
+3. 同一分析重复触发不会重复派单（幂等）。
+4. 聊天窗口不再拉长整页，工作区切换清晰可用，地图首屏更聚焦。
+5. lint/build/py_compile 通过。
 
 ---
 
-## 10. 版本节奏建议
+## 9. 后续功能扩展方案（供评审）
 
-- `v2.1`：闭环能力最小可用（本次）。
-- `v2.2`：移动端实时化 + 地图交互编辑。
-- `v2.3`：自动派单 + 复盘导出 + 压测。
-- `v3.0`：数据库升级 + 权限体系 + 生产化部署。
+1. 余震风险热力图（按时间窗刷新）。
+2. 楼栋级搜救覆盖率与盲区提示。
+3. 失联人员与报平安自动对账。
+4. 队伍负载均衡与疲劳阈值告警。
+5. 物资消耗预测（4h/8h）。
+6. 避难点拥挤度预测与分流推荐。
+7. 多渠道通知（App/短信/语音）统一回执。
+8. 演练沙盘回放与评分系统。
+9. SOP 模板化一键下发。
+10. 指挥复盘自动报告（Markdown/PDF）。
