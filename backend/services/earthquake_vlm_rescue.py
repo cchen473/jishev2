@@ -373,26 +373,29 @@ class EarthquakeVLMRescueAnalyzer:
             {"type": "image_url", "image_url": {"url": f"data:{image_mime};base64,{encoded}"}},
         ]
 
-        client_kwargs: dict[str, Any] = {"api_key": self.api_key}
-        if self.base_url:
-            client_kwargs["base_url"] = self.base_url
-        client = OpenAI(**client_kwargs)
-        completion = client.chat.completions.create(
-            model=self.model,
-            temperature=0.1,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "你是地震应急视觉专家，输出必须是 JSON。",
-                },
-                {"role": "user", "content": user_content},
-            ],
-        )
-        raw = completion.choices[0].message.content if completion.choices else ""
-        payload = _extract_json_block(raw if isinstance(raw, str) else "")
-        if not payload:
-            return {"status": "degraded", "error": "模型输出不是可解析 JSON", "raw": raw}
-        return {"status": "ok", "payload": payload, "raw": raw}
+        try:
+            client_kwargs: dict[str, Any] = {"api_key": self.api_key}
+            if self.base_url:
+                client_kwargs["base_url"] = self.base_url
+            client = OpenAI(**client_kwargs)
+            completion = client.chat.completions.create(
+                model=self.model,
+                temperature=0.1,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "你是地震应急视觉专家，输出必须是 JSON。",
+                    },
+                    {"role": "user", "content": user_content},
+                ],
+            )
+            raw = completion.choices[0].message.content if completion.choices else ""
+            payload = _extract_json_block(raw if isinstance(raw, str) else "")
+            if not payload:
+                return {"status": "degraded", "error": "模型输出不是可解析 JSON", "raw": raw}
+            return {"status": "ok", "payload": payload, "raw": raw}
+        except Exception as exc:
+            return {"status": "degraded", "error": f"模型调用异常：{exc}"}
 
     def _build_annotation_image(
         self,

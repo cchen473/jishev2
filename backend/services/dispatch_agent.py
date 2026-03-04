@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -9,6 +10,89 @@ try:
     from openai import OpenAI
 except Exception:  # pragma: no cover - optional dependency
     OpenAI = None
+
+
+def _to_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _normalize_text(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _infer_task_profile(victim: dict[str, Any]) -> str:
+    blob = " ".join(
+        [
+            _normalize_text(victim.get("condition")),
+            _normalize_text(victim.get("evidence")),
+            _normalize_text(victim.get("position_hint")),
+            _normalize_text(victim.get("risk_level")),
+        ]
+    )
+    if any(keyword in blob for keyword in ("重伤", "流血", "medical", "急救", "昏迷")):
+        return "medical"
+    if any(keyword in blob for keyword in ("坍塌", "埋压", "破拆", "受困", "trapped")):
+        return "rescue"
+    return "search"
+
+
+def _team_score(
+    team: dict[str, Any],
+    *,
+    task_profile: str,
+    target_lat: float | None,
+    target_lng: float | None,
+) -> float:
+    status = _normalize_text(team.get("status"))
+    if status == "offline":
+        return -10_000.0
+    score = 0.0
+    availability = _to_float(team.get("availability_score"))
+    if availability is not None:
+        score += max(0.0, min(availability, 1.0)) * 40.0
+    personnel_count = _to_float(team.get("personnel_count"))
+    if personnel_count is not None:
+        score += min(personnel_count, 12.0) * 1.4
+    capacity = _to_float(team.get("capacity"))
+    if capacity is not None:
+        score += min(capacity, 20.0) * 0.6
+    if status == "standby":
+        score += 20.0
+    elif status == "deployed":
+        score += 8.0
+
+    specialty = _normalize_text(team.get("specialty"))
+    equipment = team.get("equipment")
+    if isinstance(equipment, list):
+        equipment_blob = " ".join(_normalize_text(item) for item in equipment)
+    else:
+        equipment_blob = ""
+    capability_blob = f"{specialty} {equipment_blob}"
+    if task_profile == "medical" and any(k in capability_blob for k in ("医疗", "急救", "aed", "担架")):
+        score += 24.0
+    elif task_profile == "rescue" and any(k in capability_blob for k in ("破拆", "救援", "支撑", "转运")):
+        score += 24.0
+    elif task_profile == "search" and any(k in capability_blob for k in ("搜索", "侦查", "无人机", "探测")):
+        score += 24.0
+    else:
+        score += 6.0
+
+    team_lat = _to_float(team.get("base_lat"))
+    team_lng = _to_float(team.get("base_lng"))
+    if (
+        target_lat is not None
+        and target_lng is not None
+        and team_lat is not None
+        and team_lng is not None
+    ):
+        distance = math.sqrt((team_lat - target_lat) ** 2 + (team_lng - target_lng) ** 2)
+        score -= distance * 6_000.0
+    return score
 
 
 def _extract_json_block(raw: str) -> dict[str, Any] | None:
@@ -141,7 +225,10 @@ class DispatchAgentPlanner:
         if not isinstance(victims, list):
             victims = []
         active_incidents = [item for item in incidents if str(item.get("status")) != "closed"]
-        primary_team_ids = [str(item.get("id")) for item in teams if item.get("id")]
+        primary_teams = [item for item in teams if item.get("id")]
+        primary_team_ids = [str(item.get("id")) for item in primary_teams if item.get("id")]
+        target_lat = _to_float(analysis.get("incident_lat"))
+        target_lng = _to_float(analysis.get("incident_lng"))
         incident_title = "地震受灾搜救事件"
         incident_desc = str(analysis.get("scene_overview") or "地震现场自动调度事件")
 
@@ -161,9 +248,30 @@ class DispatchAgentPlanner:
         victim_count = min(len(victims), self.max_tasks)
         if victim_count == 0:
             victim_count = 1
+        dispatch_team_ids: list[str] = []
         for idx in range(victim_count):
             victim = victims[idx] if idx < len(victims) else {}
-            team_id = primary_team_ids[idx % len(primary_team_ids)] if primary_team_ids else None
+            profile = _infer_task_profile(victim if isinstance(victim, dict) else {})
+            team_id = None
+            if primary_teams:
+                ranked = sorted(
+                    primary_teams,
+                    key=lambda item: _team_score(
+                        item,
+                        task_profile=profile,
+                        target_lat=target_lat,
+                        target_lng=target_lng,
+                    ),
+                    reverse=True,
+                )
+                best_team = next(
+                    (item for item in ranked if _normalize_text(item.get("status")) != "offline"),
+                    ranked[0] if ranked else None,
+                )
+                if best_team and best_team.get("id"):
+                    team_id = str(best_team.get("id"))
+                    if team_id not in dispatch_team_ids:
+                        dispatch_team_ids.append(team_id)
             position = str(victim.get("position_hint") or f"疑似点位-{idx + 1}")
             confidence = float(victim.get("confidence", 0.0) or 0.0)
             task_actions.append(
@@ -171,7 +279,7 @@ class DispatchAgentPlanner:
                     "action": "create",
                     "title": f"AI搜救任务-{idx + 1}",
                     "description": (
-                        f"[AI-AUTO] 前往 {position} 执行搜索与转运，"
+                        f"[AI-AUTO] 前往 {position} 执行{ '医疗救护' if profile == 'medical' else '破拆转运' if profile == 'rescue' else '搜索排查' }，"
                         f"参考置信度 {confidence:.2f}。"
                     ),
                     "priority": "critical" if confidence >= 0.72 else "high",
@@ -180,15 +288,24 @@ class DispatchAgentPlanner:
                     "assignee_user_id": None,
                 }
             )
-        for idx, team_id in enumerate(primary_team_ids[: max(1, min(3, len(primary_team_ids)))], 1):
+        if not dispatch_team_ids:
+            dispatch_team_ids = primary_team_ids[: max(1, min(3, len(primary_team_ids)))]
+        for idx, team_id in enumerate(dispatch_team_ids[: max(1, min(3, len(dispatch_team_ids)))], 1):
+            team = next((item for item in primary_teams if str(item.get("id")) == team_id), None)
+            equipment = team.get("equipment") if isinstance(team, dict) else []
+            equipment_text = (
+                "、".join(str(item) for item in equipment[:2])
+                if isinstance(equipment, list) and equipment
+                else "基础搜救装备"
+            )
             dispatch_actions.append(
                 {
                     "resource_type": "rescue_team",
-                    "resource_name": f"搜救队-{idx}",
+                    "resource_name": str(team.get("name") if isinstance(team, dict) else f"搜救队-{idx}"),
                     "quantity": 1,
                     "status": "allocated",
                     "team_id": team_id,
-                    "notes": "AI-AUTO：按地震图像识别结果优先出动。",
+                    "notes": f"AI-AUTO：按地震图像识别结果优先出动，携带 {equipment_text}。",
                 }
             )
         return {

@@ -1,4 +1,4 @@
-# NebulaGuard 当前进度 Spec（2026-02-24）
+# NebulaGuard 当前进度 Spec（2026-03-01）
 
 ## 1. 目标与范围
 
@@ -13,7 +13,7 @@
 
 ## 2. 当前总体状态
 
-- 后端健康：`/health` 返回 `ok`。
+- 后端健康：`/health` 已切换为快速模式（不再执行 RAG 远程探测）。
 - 前端状态：`npm run lint` / `npm run build`（frontend）可通过。
 - 救援主链路：已切换为 `POST /rescue/earthquake/analyze`。
 - 自动调度：分析完成后自动执行，结果入库并广播。
@@ -68,6 +68,22 @@
 - 新增交互文档：`docs/interaction/web-interaction-guide.md`
 - 更新功能文档：`docs/功能文档.md`（含项目实用价值说明）
 - 更新治理规范：`AGENT.md`
+
+### 3.6 稳定性热修（认证与启动）
+
+- `/health` 移除重型 `retrieve_policy(...)` 调用，避免外网受限导致单进程阻塞。
+- Web 端认证启动增加 7 秒硬超时，自动回退到登录页并提示重登。
+- Flutter 启动探测改为轻量 `GET /`，并为认证相关请求统一增加超时保护。
+
+### 3.7 救援队数据与演示态治理
+
+- `response_teams` 结构已扩展为可维护位置与配置：
+  - `base_lat/base_lng/base_location_text`
+  - `equipment[]/vehicles[]`
+  - `capacity/availability_score/last_active_at`
+- 自动调度 Agent 启发式会读取本地救援队能力与位置，优先分配可用队伍。
+- 社区首次进入会自动补齐默认救援队（先遣搜索/医疗转运/破拆救援）。
+- Web 与 Flutter 的 token 本地持久化已关闭，演示环境默认无历史登录缓存干扰。
 
 ---
 

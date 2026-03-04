@@ -1,20 +1,15 @@
-import 'package:shared_preferences/shared_preferences.dart';
-
 class SessionStore {
-  static const _tokenKey = 'nebulaguard_auth_token';
+  static String _volatileToken = '';
 
   Future<void> saveToken(String token) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_tokenKey, token);
+    _volatileToken = token;
   }
 
   Future<String> readToken() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_tokenKey) ?? '';
+    return _volatileToken;
   }
 
   Future<void> clearToken() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_tokenKey);
+    _volatileToken = '';
   }
 }

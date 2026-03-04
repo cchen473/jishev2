@@ -114,10 +114,22 @@
 3. 索引优先覆盖：
    - `community_id + created_at`
    - `incident_id + status + priority`
+4. `response_teams` 必须维护可调度字段（位置、装备、可用度），至少包含：
+   - `base_lat/base_lng/base_location_text`
+   - `equipment/vehicles`
+   - `capacity/availability_score`
 
 ---
 
-## 10. Definition of Done（DoD）
+## 10. 演示环境缓存约定
+
+1. 演示默认关闭客户端 token 持久化（避免历史缓存污染流程）。
+2. 如需持久化登录，必须通过显式开关启用，不得默认写入本地缓存。
+3. 演示前需确认社区存在默认救援队初始数据。
+
+---
+
+## 11. Definition of Done（DoD）
 
 功能完成必须满足：
 
@@ -132,7 +144,7 @@
 
 ---
 
-## 11. UI 评审清单
+## 12. UI 评审清单
 
 1. 颜色层级清晰，状态色仅用于告警。
 2. 聊天/日志等高频区保持独立滚动，不拉长整页。
@@ -142,7 +154,7 @@
 
 ---
 
-## 12. 发布清单
+## 13. 发布清单
 
 1. `/health` 通过。
 2. 前端构建通过。
@@ -155,7 +167,7 @@
 
 ---
 
-## 13. 安全与风险约定
+## 14. 安全与风险约定
 
 1. 未经明确确认，不做 destructive 数据操作。
 2. 密钥只能通过 `.env` 注入，不得入库或写死代码。

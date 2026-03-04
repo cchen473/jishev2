@@ -1,6 +1,9 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../core/api_client.dart';
 import '../core/models.dart';
@@ -77,11 +80,15 @@ class _ReportTabState extends State<ReportTab> {
   bool _submitting = false;
   int _feltLevel = 5;
   String _buildingType = '钢筋混凝土住宅';
+  final _imagePicker = ImagePicker();
   final _latController = TextEditingController();
   final _lngController = TextEditingController();
   final _structureController = TextEditingController();
   final _descriptionController = TextEditingController();
-  List<String> _advice = [];
+  XFile? _roomImage;
+  String _adviceMarkdown = '';
+  int _typedLength = 0;
+  Timer? _typingTimer;
 
   static const _buildingTypes = [
     '钢筋混凝土住宅',
@@ -103,11 +110,62 @@ class _ReportTabState extends State<ReportTab> {
 
   @override
   void dispose() {
+    _typingTimer?.cancel();
     _latController.dispose();
     _lngController.dispose();
     _structureController.dispose();
     _descriptionController.dispose();
     super.dispose();
+  }
+
+  String _buildAdviceMarkdown(List<String> advice) {
+    if (advice.isEmpty) {
+      return '';
+    }
+    final lines = <String>['## 躲避建议'];
+    for (var i = 0; i < advice.length; i++) {
+      lines.add('${i + 1}. ${advice[i]}');
+    }
+    return lines.join('\n\n');
+  }
+
+  void _startTypewriter(String markdown) {
+    _typingTimer?.cancel();
+    setState(() {
+      _adviceMarkdown = markdown;
+      _typedLength = 0;
+    });
+    if (markdown.isEmpty) {
+      return;
+    }
+    _typingTimer = Timer.periodic(const Duration(milliseconds: 18), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      setState(() {
+        _typedLength = (_typedLength + 2).clamp(0, _adviceMarkdown.length);
+      });
+      if (_typedLength >= _adviceMarkdown.length) {
+        timer.cancel();
+      }
+    });
+  }
+
+  Future<void> _pickRoomImage(ImageSource source) async {
+    try {
+      final file = await _imagePicker.pickImage(
+        source: source,
+        imageQuality: 88,
+        maxWidth: 2000,
+      );
+      if (file == null || !mounted) {
+        return;
+      }
+      setState(() => _roomImage = file);
+    } catch (e) {
+      _toast('图片选择失败：$e');
+    }
   }
 
   Future<void> _submit() async {
@@ -117,20 +175,23 @@ class _ReportTabState extends State<ReportTab> {
       _toast('坐标格式不正确');
       return;
     }
+    if (_roomImage == null) {
+      _toast('请先上传房间/周边构造图片');
+      return;
+    }
 
     setState(() => _submitting = true);
     try {
-      final advice = await widget.api.submitEarthquakeReport(
+      final advice = await widget.api.submitEarthquakeReportWithImage(
         lat: lat,
         lng: lng,
         feltLevel: _feltLevel,
         buildingType: _buildingType,
         structureNotes: _structureController.text.trim(),
         description: _descriptionController.text.trim(),
+        imagePath: _roomImage!.path,
       );
-      setState(() {
-        _advice = advice;
-      });
+      _startTypewriter(_buildAdviceMarkdown(advice));
       _toast('上报成功，社区已收到通知');
     } catch (e) {
       _toast('$e');
@@ -218,6 +279,61 @@ class _ReportTabState extends State<ReportTab> {
                     hintText: '描述震感、人群状态、异常情况',
                   ),
                 ),
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.grey.withOpacity(0.35)),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  padding: const EdgeInsets.all(10),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('房间/周边构造图片', style: Theme.of(context).textTheme.labelLarge),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          OutlinedButton.icon(
+                            onPressed: _submitting ? null : () => _pickRoomImage(ImageSource.gallery),
+                            icon: const Icon(Icons.photo_library_outlined),
+                            label: const Text('相册'),
+                          ),
+                          const SizedBox(width: 8),
+                          OutlinedButton.icon(
+                            onPressed: _submitting ? null : () => _pickRoomImage(ImageSource.camera),
+                            icon: const Icon(Icons.photo_camera_outlined),
+                            label: const Text('拍照'),
+                          ),
+                          const Spacer(),
+                          if (_roomImage != null)
+                            TextButton(
+                              onPressed: _submitting
+                                  ? null
+                                  : () => setState(() => _roomImage = null),
+                              child: const Text('移除'),
+                            ),
+                        ],
+                      ),
+                      if (_roomImage != null) ...[
+                        const SizedBox(height: 8),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(10),
+                          child: Image.file(
+                            File(_roomImage!.path),
+                            height: 150,
+                            width: double.infinity,
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                      ] else
+                        Text(
+                          '请上传现场结构图，VLM 将据此生成躲避建议',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                    ],
+                  ),
+                ),
                 const SizedBox(height: 14),
                 SizedBox(
                   width: double.infinity,
@@ -237,7 +353,7 @@ class _ReportTabState extends State<ReportTab> {
             ),
           ),
         ),
-        if (_advice.isNotEmpty) ...[
+        if (_adviceMarkdown.isNotEmpty) ...[
           const SizedBox(height: 12),
           Card(
             child: Padding(
@@ -245,14 +361,16 @@ class _ReportTabState extends State<ReportTab> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('躲避建议', style: Theme.of(context).textTheme.titleMedium),
+                  Text('VLM 躲避建议', style: Theme.of(context).textTheme.titleMedium),
                   const SizedBox(height: 8),
-                  ..._advice.asMap().entries.map(
-                        (e) => Padding(
-                          padding: const EdgeInsets.only(bottom: 6),
-                          child: Text('${e.key + 1}. ${e.value}'),
-                        ),
-                      ),
+                  MarkdownBody(
+                    data: _adviceMarkdown.substring(0, _typedLength),
+                    selectable: true,
+                    styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
+                      p: Theme.of(context).textTheme.bodyMedium?.copyWith(height: 1.45),
+                      listBullet: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                  ),
                 ],
               ),
             ),

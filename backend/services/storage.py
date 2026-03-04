@@ -25,6 +25,23 @@ class Storage:
         conn.row_factory = sqlite3.Row
         return conn
 
+    def _table_columns(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        return {str(row["name"]) for row in rows}
+
+    def _ensure_column(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        table_name: str,
+        column_name: str,
+        definition: str,
+    ) -> None:
+        columns = self._table_columns(conn, table_name)
+        if column_name in columns:
+            return
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+
     def _init_db(self) -> None:
         with self._lock:
             with self._connect() as conn:
@@ -229,6 +246,15 @@ class Storage:
                         status TEXT NOT NULL DEFAULT 'standby',
                         leader_user_id TEXT,
                         contact TEXT,
+                        base_lat REAL,
+                        base_lng REAL,
+                        base_location_text TEXT,
+                        equipment_json TEXT,
+                        vehicle_json TEXT,
+                        personnel_count INTEGER NOT NULL DEFAULT 0,
+                        capacity INTEGER NOT NULL DEFAULT 8,
+                        availability_score REAL NOT NULL DEFAULT 1.0,
+                        last_active_at TEXT,
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL,
                         FOREIGN KEY(community_id) REFERENCES communities(id),
@@ -490,6 +516,60 @@ class Storage:
                     CREATE INDEX IF NOT EXISTS idx_dispatch_agent_runs_analysis
                     ON dispatch_agent_runs(analysis_id, created_at);
                     """
+                )
+                self._ensure_column(
+                    conn,
+                    table_name="response_teams",
+                    column_name="base_lat",
+                    definition="REAL",
+                )
+                self._ensure_column(
+                    conn,
+                    table_name="response_teams",
+                    column_name="base_lng",
+                    definition="REAL",
+                )
+                self._ensure_column(
+                    conn,
+                    table_name="response_teams",
+                    column_name="base_location_text",
+                    definition="TEXT",
+                )
+                self._ensure_column(
+                    conn,
+                    table_name="response_teams",
+                    column_name="equipment_json",
+                    definition="TEXT",
+                )
+                self._ensure_column(
+                    conn,
+                    table_name="response_teams",
+                    column_name="vehicle_json",
+                    definition="TEXT",
+                )
+                self._ensure_column(
+                    conn,
+                    table_name="response_teams",
+                    column_name="personnel_count",
+                    definition="INTEGER NOT NULL DEFAULT 0",
+                )
+                self._ensure_column(
+                    conn,
+                    table_name="response_teams",
+                    column_name="capacity",
+                    definition="INTEGER NOT NULL DEFAULT 8",
+                )
+                self._ensure_column(
+                    conn,
+                    table_name="response_teams",
+                    column_name="availability_score",
+                    definition="REAL NOT NULL DEFAULT 1.0",
+                )
+                self._ensure_column(
+                    conn,
+                    table_name="response_teams",
+                    column_name="last_active_at",
+                    definition="TEXT",
                 )
                 conn.commit()
 
@@ -1524,6 +1604,15 @@ class Storage:
         status: str,
         leader_user_id: str | None,
         contact: str | None,
+        base_lat: float | None = None,
+        base_lng: float | None = None,
+        base_location_text: str | None = None,
+        equipment: list[str] | None = None,
+        vehicles: list[str] | None = None,
+        personnel_count: int = 0,
+        capacity: int = 8,
+        availability_score: float = 1.0,
+        last_active_at: str | None = None,
     ) -> dict[str, Any]:
         now = utc_now()
         record = {
@@ -1534,6 +1623,15 @@ class Storage:
             "status": status,
             "leader_user_id": leader_user_id,
             "contact": (contact or "").strip() or None,
+            "base_lat": float(base_lat) if base_lat is not None else None,
+            "base_lng": float(base_lng) if base_lng is not None else None,
+            "base_location_text": (base_location_text or "").strip() or None,
+            "equipment_json": json.dumps(equipment or [], ensure_ascii=False),
+            "vehicle_json": json.dumps(vehicles or [], ensure_ascii=False),
+            "personnel_count": max(0, int(personnel_count)),
+            "capacity": max(1, int(capacity)),
+            "availability_score": max(0.0, min(float(availability_score), 1.0)),
+            "last_active_at": (last_active_at or "").strip() or None,
             "created_at": now,
             "updated_at": now,
         }
@@ -1542,16 +1640,25 @@ class Storage:
                 conn.execute(
                     """
                     INSERT INTO response_teams (
-                        id, community_id, name, specialty, status, leader_user_id, contact, created_at, updated_at
+                        id, community_id, name, specialty, status, leader_user_id, contact,
+                        base_lat, base_lng, base_location_text, equipment_json, vehicle_json,
+                        personnel_count, capacity, availability_score, last_active_at, created_at, updated_at
                     )
                     VALUES (
-                        :id, :community_id, :name, :specialty, :status, :leader_user_id, :contact, :created_at, :updated_at
+                        :id, :community_id, :name, :specialty, :status, :leader_user_id, :contact,
+                        :base_lat, :base_lng, :base_location_text, :equipment_json, :vehicle_json,
+                        :personnel_count, :capacity, :availability_score, :last_active_at, :created_at, :updated_at
                     )
                     """,
                     record,
                 )
                 conn.commit()
-        return record
+        return {
+            **record,
+            "equipment": equipment or [],
+            "vehicles": vehicles or [],
+            "member_count": 0,
+        }
 
     def add_team_member(self, *, team_id: str, user_id: str, role: str = "member") -> dict[str, Any]:
         record = {
@@ -1589,7 +1696,9 @@ class Storage:
                     """
                     SELECT
                         t.id, t.community_id, t.name, t.specialty, t.status,
-                        t.leader_user_id, t.contact, t.created_at, t.updated_at,
+                        t.leader_user_id, t.contact, t.base_lat, t.base_lng, t.base_location_text,
+                        t.equipment_json, t.vehicle_json, t.personnel_count, t.capacity, t.availability_score, t.last_active_at,
+                        t.created_at, t.updated_at,
                         u.display_name as leader_name,
                         (
                             SELECT COUNT(*)
@@ -1604,9 +1713,91 @@ class Storage:
                     """,
                     (community_id, safe_limit),
                 ).fetchall()
-        items = [dict(row) for row in rows]
+        items = []
+        for row in rows:
+            item = dict(row)
+            equipment = self._safe_load_json(item.pop("equipment_json", None))
+            vehicles = self._safe_load_json(item.pop("vehicle_json", None))
+            item["equipment"] = equipment if isinstance(equipment, list) else []
+            item["vehicles"] = vehicles if isinstance(vehicles, list) else []
+            if item.get("capacity") is None:
+                item["capacity"] = 8
+            if item.get("personnel_count") is None:
+                item["personnel_count"] = 0
+            if item.get("availability_score") is None:
+                item["availability_score"] = 1.0
+            items.append(item)
         items.reverse()
         return items
+
+    def ensure_default_response_teams(
+        self,
+        *,
+        community_id: str,
+        base_lat: float,
+        base_lng: float,
+    ) -> list[dict[str, Any]]:
+        defaults = [
+            {
+                "name": "先遣搜索一队",
+                "specialty": "搜索排查",
+                "contact": "VHF-01",
+                "base_lat_offset": 0.0022,
+                "base_lng_offset": 0.0016,
+                "base_location_text": "东侧前置点",
+                "equipment": ["生命探测仪", "热成像无人机", "便携照明"],
+                "vehicles": ["轻型救援车"],
+                "personnel_count": 7,
+                "capacity": 8,
+            },
+            {
+                "name": "医疗转运组",
+                "specialty": "医疗救护",
+                "contact": "VHF-02",
+                "base_lat_offset": -0.0018,
+                "base_lng_offset": 0.0021,
+                "base_location_text": "社区医疗站",
+                "equipment": ["急救包", "AED", "折叠担架"],
+                "vehicles": ["医疗转运车"],
+                "personnel_count": 5,
+                "capacity": 6,
+            },
+            {
+                "name": "破拆救援组",
+                "specialty": "破拆救援",
+                "contact": "VHF-03",
+                "base_lat_offset": 0.0013,
+                "base_lng_offset": -0.0023,
+                "base_location_text": "西南装备点",
+                "equipment": ["液压破拆工具", "支撑套件", "防护头盔"],
+                "vehicles": ["重型救援车"],
+                "personnel_count": 9,
+                "capacity": 10,
+            },
+        ]
+        existing = self.list_response_teams(community_id=community_id, limit=300)
+        existing_names = {str(item.get("name")) for item in existing}
+        for item in defaults:
+            if item["name"] in existing_names:
+                continue
+            self.create_response_team(
+                community_id=community_id,
+                name=item["name"],
+                specialty=item["specialty"],
+                status="standby",
+                leader_user_id=None,
+                contact=item["contact"],
+                base_lat=base_lat + float(item["base_lat_offset"]),
+                base_lng=base_lng + float(item["base_lng_offset"]),
+                base_location_text=item["base_location_text"],
+                equipment=list(item["equipment"]),
+                vehicles=list(item["vehicles"]),
+                personnel_count=int(item["personnel_count"]),
+                capacity=int(item["capacity"]),
+                availability_score=1.0,
+                last_active_at=utc_now(),
+            )
+        return self.list_response_teams(community_id=community_id, limit=300)
 
     def create_dispatch_record(
         self,

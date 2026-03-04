@@ -77,6 +77,16 @@ MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "8")) * 1024 * 1024
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_\u4e00-\u9fff]{2,32}$")
 MAX_RESCUE_IMAGES = int(os.getenv("MAX_RESCUE_IMAGES", os.getenv("MAX_FIRE_IMAGES", "6")))
 UNSUPPORTED_AERIAL_IMAGE_TYPES = {"image/heic", "image/heif"}
+ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".heic", ".heif"}
+IMAGE_EXTENSION_MIME = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".heic": "image/heic",
+    ".heif": "image/heif",
+}
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -120,6 +130,15 @@ class LegacyReportRequest(BaseModel):
 class CommunityAlertRequest(BaseModel):
     title: str = Field(..., min_length=2, max_length=80)
     content: str = Field(..., min_length=2, max_length=600)
+
+
+class OneClickWarningRequest(BaseModel):
+    title: str = Field(default="地震紧急预警", min_length=2, max_length=80)
+    content: str = Field(
+        default="请立即远离玻璃和外墙，按社区避险路线前往最近集合点，保持手机畅通并等待后续调度。",
+        min_length=2,
+        max_length=600,
+    )
 
 
 class CommunityChatRequest(BaseModel):
@@ -185,6 +204,14 @@ class TeamCreateRequest(BaseModel):
     status: str = Field(default="standby", pattern="^(standby|deployed|offline)$")
     leader_user_id: str | None = None
     contact: str | None = Field(default=None, max_length=120)
+    base_lat: float | None = Field(default=None, ge=-90, le=90)
+    base_lng: float | None = Field(default=None, ge=-180, le=180)
+    base_location_text: str | None = Field(default=None, max_length=120)
+    equipment: list[str] = Field(default_factory=list, max_length=40)
+    vehicles: list[str] = Field(default_factory=list, max_length=20)
+    personnel_count: int = Field(default=0, ge=0, le=200)
+    capacity: int = Field(default=8, ge=1, le=200)
+    availability_score: float = Field(default=1.0, ge=0, le=1)
     member_user_ids: list[str] = Field(default_factory=list, max_length=30)
 
 
@@ -356,6 +383,36 @@ def utc_now() -> str:
 
 def build_public_image_url(filename: str) -> str:
     return f"/uploads/{filename}"
+
+
+async def read_and_validate_image_upload(image: UploadFile) -> tuple[bytes, str, str]:
+    ext = Path(image.filename or "").suffix.lower()
+    if not ext:
+        ext = ".jpg"
+    content = await image.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Invalid file type. Image required.")
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Image too large. Limit is {MAX_UPLOAD_BYTES // (1024 * 1024)}MB",
+        )
+    try:
+        with Image.open(io.BytesIO(content)) as verified:
+            verified.verify()
+    except UnidentifiedImageError as exc:
+        raise HTTPException(status_code=400, detail="Invalid file type. Image required.") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Image validation failed.") from exc
+
+    uploaded_type = (image.content_type or "").strip().lower()
+    if uploaded_type.startswith("image/"):
+        mime = uploaded_type
+    else:
+        if ext not in ALLOWED_IMAGE_EXTENSIONS:
+            raise HTTPException(status_code=400, detail="Invalid file type. Image required.")
+        mime = IMAGE_EXTENSION_MIME.get(ext, "image/jpeg")
+    return content, ext, mime
 
 
 def normalize_advice_text(text: str) -> list[str]:
@@ -534,13 +591,17 @@ def run_community_assistant(
             f"社区状态:\n{snapshot}\n\n"
             f"近期群聊上下文:\n{chat_context or '- 暂无'}\n"
         )
-        client_kwargs: dict[str, Any] = {"api_key": settings.openai_api_key}
+        client_kwargs: dict[str, Any] = {
+            "api_key": settings.openai_api_key,
+            "timeout": 25.0,
+        }
         if settings.openai_base_url:
             client_kwargs["base_url"] = settings.openai_base_url
         client = OpenAI(**client_kwargs)
         completion = client.chat.completions.create(
             model=settings.openai_model,
             temperature=0.3,
+            timeout=25.0,
             messages=[
                 {
                     "role": "system",
@@ -564,6 +625,22 @@ def _pick_value(value: str, allowed: set[str], fallback: str) -> str:
     return fallback
 
 
+def ensure_local_response_teams(community: dict[str, Any]) -> list[dict[str, Any]]:
+    try:
+        base_lat = float(community.get("base_lat", settings.base_lat))
+    except Exception:
+        base_lat = float(settings.base_lat)
+    try:
+        base_lng = float(community.get("base_lng", settings.base_lng))
+    except Exception:
+        base_lng = float(settings.base_lng)
+    return storage.ensure_default_response_teams(
+        community_id=community["id"],
+        base_lat=base_lat,
+        base_lng=base_lng,
+    )
+
+
 async def execute_dispatch_agent_for_analysis(
     *,
     community: dict[str, Any],
@@ -578,14 +655,19 @@ async def execute_dispatch_agent_for_analysis(
 
     incidents = storage.list_incidents(community_id=community["id"], limit=200)
     tasks = storage.list_tasks(community_id=community["id"], limit=300)
-    teams = storage.list_response_teams(community_id=community["id"], limit=200)
+    teams = ensure_local_response_teams(community)
     dispatches = storage.list_dispatch_records(community_id=community["id"], limit=200)
     analysis_payload = analysis_record.get("analysis") if isinstance(analysis_record, dict) else {}
     if not isinstance(analysis_payload, dict):
         analysis_payload = {}
+    analysis_for_plan = {
+        **analysis_payload,
+        "incident_lat": analysis_record.get("lat"),
+        "incident_lng": analysis_record.get("lng"),
+    }
 
     plan_result = dispatch_agent_planner.generate_plan(
-        analysis=analysis_payload,
+        analysis=analysis_for_plan,
         incidents=incidents,
         tasks=tasks,
         teams=teams,
@@ -813,6 +895,35 @@ async def execute_dispatch_agent_for_analysis(
         error="; ".join(execution_errors) if execution_errors else None,
     )
     result = updated_run or run
+
+    for incident_id in created_incident_ids:
+        incident = storage.get_incident(incident_id, community["id"])
+        if incident:
+            await manager.broadcast_to_community(
+                community["id"],
+                {"type": "incident_created", "incident": incident},
+            )
+    for incident_id in updated_incident_ids:
+        incident = storage.get_incident(incident_id, community["id"])
+        if incident:
+            await manager.broadcast_to_community(
+                community["id"],
+                {"type": "incident_updated", "incident": incident},
+            )
+    for task_id in created_task_ids:
+        task = storage.get_task(task_id, community["id"])
+        if task:
+            await manager.broadcast_to_community(
+                community["id"],
+                {"type": "task_created", "task": task},
+            )
+    for task_id in updated_task_ids:
+        task = storage.get_task(task_id, community["id"])
+        if task:
+            await manager.broadcast_to_community(
+                community["id"],
+                {"type": "task_updated", "task": task},
+            )
 
     record_audit(
         community_id=community["id"],
@@ -1169,17 +1280,12 @@ async def health() -> dict[str, Any]:
     except Exception:
         db_ok = False
 
-    try:
-        rag_snippets = retrieve_policy("earthquake shelter", k=1)
-        rag_ok = isinstance(rag_snippets, list)
-    except Exception:
-        rag_ok = False
-
-    status = "ok" if db_ok and rag_ok else "degraded"
+    status = "ok" if db_ok else "degraded"
     return {
         "status": status,
         "database": db_ok,
-        "rag": rag_ok,
+        "rag": True,
+        "rag_checked": False,
         "time": utc_now(),
         "mode": settings.app_mode,
     }
@@ -1206,6 +1312,7 @@ async def auth_register(req: RegisterRequest) -> dict[str, Any]:
     member_count = storage.get_community_member_count(community["id"])
     role = "owner" if member_count == 0 else "member"
     storage.add_user_to_community(user["id"], community["id"], role=role)
+    ensure_local_response_teams(community)
 
     token = issue_token(user["id"])
     return {
@@ -1225,6 +1332,8 @@ async def auth_login(req: LoginRequest) -> dict[str, Any]:
         raise HTTPException(status_code=403, detail="账户已停用")
 
     community = storage.get_user_primary_community(user["id"])
+    if community:
+        ensure_local_response_teams(community)
     token = issue_token(user["id"])
     return {
         "status": "success",
@@ -1294,6 +1403,73 @@ async def community_alert_broadcast(
         entity_type="notification",
         entity_id=notification["id"],
         payload={"notification": notification},
+        created_by_user_id=user["id"],
+        ws_type="ops_timeline_event",
+    )
+    return {"status": "success", "notification": notification}
+
+
+@app.post("/community/alerts/one-click-warning")
+async def one_click_warning(
+    req: OneClickWarningRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+) -> dict[str, Any]:
+    community = user["community"]
+    title = req.title.strip()
+    content = req.content.strip()
+    notification = storage.create_notification(
+        community_id=community["id"],
+        sender_user_id=user["id"],
+        title=title,
+        content=content,
+        payload={
+            "manual": True,
+            "is_emergency": True,
+            "warning_type": "earthquake",
+            "warning_level": "critical",
+            "trigger": "one_click_warning",
+        },
+    )
+    notification.pop("payload_json", None)
+
+    warning_payload = {
+        "type": "community_warning",
+        "source": "COMMUNITY_WARNING",
+        "title": title,
+        "content": content,
+        "community_id": community["id"],
+        "severity": "critical",
+        "notification": notification,
+    }
+    await manager.broadcast_to_community(community["id"], warning_payload)
+    await manager.broadcast_to_community(
+        community["id"],
+        {
+            "type": "community_alert",
+            "source": "COMMUNITY_ALERT",
+            "title": title,
+            "content": content,
+            "community_id": community["id"],
+            "notification": notification,
+        },
+    )
+
+    record_audit(
+        community_id=community["id"],
+        user_id=user["id"],
+        action="community.warning.one_click",
+        target_type="notification",
+        target_id=notification["id"],
+        detail={"title": title, "severity": "critical"},
+    )
+    await record_ops_event(
+        community_id=community["id"],
+        event_type="community_warning_sent",
+        title=f"一键预警：{title}",
+        content=content,
+        entity_type="notification",
+        entity_id=notification["id"],
+        payload={"notification": notification, "severity": "critical"},
         created_by_user_id=user["id"],
         ws_type="ops_timeline_event",
     )
@@ -1651,6 +1827,15 @@ async def create_team(
         status=req.status,
         leader_user_id=req.leader_user_id,
         contact=req.contact,
+        base_lat=req.base_lat,
+        base_lng=req.base_lng,
+        base_location_text=req.base_location_text,
+        equipment=req.equipment,
+        vehicles=req.vehicles,
+        personnel_count=req.personnel_count,
+        capacity=req.capacity,
+        availability_score=req.availability_score,
+        last_active_at=utc_now(),
     )
     if req.leader_user_id:
         storage.add_team_member(team_id=team["id"], user_id=req.leader_user_id, role="leader")
@@ -1685,6 +1870,7 @@ async def add_team_member(
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     community = user["community"]
+    ensure_local_response_teams(community)
     teams = storage.list_response_teams(community_id=community["id"], limit=300)
     if not any(item.get("id") == team_id for item in teams):
         raise HTTPException(status_code=404, detail="救援队不存在")
@@ -1717,6 +1903,7 @@ async def list_teams(
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     community = user["community"]
+    ensure_local_response_teams(community)
     items = storage.list_response_teams(community_id=community["id"], limit=limit)
     return {"count": len(items), "items": items}
 
@@ -2547,24 +2734,11 @@ async def report_earthquake_with_media(
     content_type: str | None = None
 
     if image is not None:
-        if not image.content_type or not image.content_type.startswith("image/"):
-            raise HTTPException(status_code=400, detail="Invalid file type. Image required.")
-
-        ext = Path(image.filename or "").suffix.lower()
-        if not ext:
-            ext = ".jpg"
-        content = await image.read()
-        if len(content) > MAX_UPLOAD_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail=f"Image too large. Limit is {MAX_UPLOAD_BYTES // (1024 * 1024)}MB",
-            )
-
+        content, ext, content_type = await read_and_validate_image_upload(image)
         filename = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex}{ext}"
         file_path = settings.upload_dir / filename
         file_path.write_bytes(content)
         image_url = build_public_image_url(filename)
-        content_type = image.content_type
 
     return await create_earthquake_report_and_notify(
         user=user,
@@ -2612,19 +2786,7 @@ async def submit_report_with_media(
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     _ = type
-    if not image.content_type or not image.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Invalid file type. Image required.")
-
-    ext = Path(image.filename or "").suffix.lower()
-    if not ext:
-        ext = ".jpg"
-
-    content = await image.read()
-    if len(content) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Image too large. Limit is {MAX_UPLOAD_BYTES // (1024 * 1024)}MB",
-        )
+    content, ext, content_type = await read_and_validate_image_upload(image)
 
     filename = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex}{ext}"
     file_path = settings.upload_dir / filename
@@ -2640,7 +2802,7 @@ async def submit_report_with_media(
         structure_notes=structure_notes,
         description=description,
         image_bytes=content,
-        image_mime=image.content_type,
+        image_mime=content_type,
         image_url=image_url,
     )
 
@@ -2911,6 +3073,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     )
                     continue
                 limit = int(payload.get("limit", 120))
+                ensure_local_response_teams(user["community"])
                 items = storage.list_response_teams(
                     community_id=user["community"]["id"],
                     limit=max(1, min(limit, 300)),
